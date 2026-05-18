@@ -1,3 +1,5 @@
+const { escape } = require('./utils')
+
 function formatApp(app) {
   const buttons = []
 
@@ -11,7 +13,7 @@ function formatApp(app) {
     })
   })
 
-  const overview = app.overview || 'No description available.'
+  const overview  = app.overview || 'No description available.'
   const truncated = overview.length > 150 ? overview.slice(0, 147) + '...' : overview
 
   const text = [
@@ -24,10 +26,6 @@ function formatApp(app) {
   ].join('\n')
 
   return { text, buttons }
-}
-
-function escape(text) {
-  return String(text).replace(/[_*[\]()~`>#+=|{}.!\\-]/g, '\\$&')
 }
 
 module.exports = { formatApp }

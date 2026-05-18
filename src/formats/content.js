@@ -1,11 +1,13 @@
+const { escape } = require('./utils')
+
 function formatTiktok(data) {
   const { data: info, download } = data
 
-  const title = (info.title || 'TikTok Video').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
+  const title     = (info.title || 'TikTok Video').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
   const truncated = title.length > 200 ? title.slice(0, 197) + '...' : title
 
   const hdVideo = download.video?.find(v => v.quality === 'hd_no_watermark')
-  const audio = download.audio
+  const audio   = download.audio
 
   const buttons = []
   if (hdVideo) buttons.push([{ text: '📥 Download Video', url: hdVideo.original }])
@@ -34,14 +36,14 @@ function formatSpotify(data) {
     `👤 *Artist:* ${escape(info.author || 'Unknown')}`,
     `⏱ *Duration:* ${escape(info.duration || 'N/A')}`,
     `🎚 *Quality:* ${escape(info.quality || 'HQ')}`,
-    `📁 *Format:* .${escape(data.type || 'mp3')}`,
+    `📁 *Format:* \\.${escape(data.type || 'mp3')}`,
   ].join('\n')
 
   return { text, buttons }
 }
 
 function formatInstagram(data) {
-  const { data: info, download, sites } = data
+  const { data: info, download } = data
 
   const buttons = []
   if (download.video?.length) {
@@ -98,11 +100,6 @@ function formatThreads(data) {
   ].join('\n')
 
   return { text, buttons }
-}
-
-// Escape karakter spesial MarkdownV2
-function escape(text) {
-  return String(text).replace(/[_*[\]()~`>#+=|{}.!\\-]/g, '\\$&')
 }
 
 module.exports = { formatTiktok, formatSpotify, formatInstagram, formatTwitter, formatThreads }

@@ -2,20 +2,35 @@ const axios = require('axios')
 
 class VidBotClient {
   constructor() {
-  this.baseURL = process.env.API_URL
-  this.apiKey = process.env.API_KEY
-  this.accessToken = null
-  this.tokenPromise = null  // ← tambah ini
-}
+    this.baseURL = process.env.API_URL
+    this.apiKey = process.env.API_KEY
+    this.accessToken = null
+    this.tokenPromise = null
+    this.tokenError = null
+    this.tokenErrorUntil = 0
+  }
 
   async getAccessToken() {
-    const res = await axios.get(`${this.baseURL}/auth/verify`, {
-      headers: { 'X-API-Key': this.apiKey }
-    })
-    this.accessToken = res.data.access_token
-    // token berlaku 5 menit, refresh sebelum expire
-    setTimeout(() => { this.accessToken = null }, 4 * 60 * 1000)
-    return this.accessToken
+    // Fail fast selama cooldown 30 detik setelah auth error
+    if (this.tokenError && Date.now() < this.tokenErrorUntil) {
+      throw this.tokenError
+    }
+
+    try {
+      const res = await axios.get(`${this.baseURL}/auth/verify`, {
+        headers: { 'X-API-Key': this.apiKey }
+      })
+      this.accessToken = res.data.access_token
+      this.tokenError = null
+      this.tokenErrorUntil = 0
+      // Token berlaku 5 menit, refresh sebelum expire
+      setTimeout(() => { this.accessToken = null }, 4 * 60 * 1000)
+      return this.accessToken
+    } catch (err) {
+      this.tokenError = err
+      this.tokenErrorUntil = Date.now() + 30_000
+      throw err
+    }
   }
 
   async getHeaders() {
@@ -36,10 +51,10 @@ class VidBotClient {
 
   async leakcheck(id) {
     const headers = await this.getHeaders()
-    const res = await axios.post(`${this.baseURL}/leakcheck/search`,
-      { id }, { headers })
+    const res = await axios.post(`${this.baseURL}/leakcheck/search`, { id }, { headers })
     return res.data
   }
+
   async leakcheckCount() {
     const headers = await this.getHeaders()
     const res = await axios.get(`${this.baseURL}/leakcheck/count`, { headers })
@@ -48,61 +63,55 @@ class VidBotClient {
 
   async contentTiktok(url) {
     const headers = await this.getHeaders()
-    const res = await axios.post(`${this.baseURL}/content/tiktok`,
-      { url }, { headers })
+    const res = await axios.post(`${this.baseURL}/content/tiktok`, { url }, { headers })
     return res.data
   }
 
   async contentSpotify(url) {
     const headers = await this.getHeaders()
-    const res = await axios.post(`${this.baseURL}/content/spotify`,
-      { url }, { headers })
+    const res = await axios.post(`${this.baseURL}/content/spotify`, { url }, { headers })
     return res.data
   }
 
   async contentInstagram(url) {
     const headers = await this.getHeaders()
-    const res = await axios.post(`${this.baseURL}/content/instagram`,
-      { url }, { headers })
+    const res = await axios.post(`${this.baseURL}/content/instagram`, { url }, { headers })
     return res.data
   }
 
   async contentTwitter(url) {
     const headers = await this.getHeaders()
-    const res = await axios.post(`${this.baseURL}/content/twitter`,
-      { url }, { headers })
+    const res = await axios.post(`${this.baseURL}/content/twitter`, { url }, { headers })
     return res.data
   }
 
   async contentThreads(url) {
     const headers = await this.getHeaders()
-    const res = await axios.post(`${this.baseURL}/content/threads`,
-      { url }, { headers })
+    const res = await axios.post(`${this.baseURL}/content/threads`, { url }, { headers })
     return res.data
   }
 
   async vidhub(site, url) {
     const headers = await this.getHeaders()
-    const res = await axios.post(`${this.baseURL}/vidhub/${site}`,
-      { url }, { headers })
+    const res = await axios.post(`${this.baseURL}/vidhub/${site}`, { url }, { headers })
     return res.data
   }
+
   async appAndroid(keyword) {
     const headers = await this.getHeaders()
-    const res = await axios.post(`${this.baseURL}/app/android`,
-      { apk: keyword }, { headers })
+    const res = await axios.post(`${this.baseURL}/app/android`, { apk: keyword }, { headers })
     return res.data
   }
+
   async moviesSearch(keyword) {
     const headers = await this.getHeaders()
-    const res = await axios.post(`${this.baseURL}/downloader/movies/search`,
-      { movies: keyword }, { headers })
+    const res = await axios.post(`${this.baseURL}/downloader/movies/search`, { movies: keyword }, { headers })
     return res.data
   }
+
   async flacSearch(keyword) {
     const headers = await this.getHeaders()
-    const res = await axios.post(`${this.baseURL}/downloader/flac/search`,
-      { q: keyword }, { headers })
+    const res = await axios.post(`${this.baseURL}/downloader/flac/search`, { q: keyword }, { headers })
     return res.data
   }
 }

@@ -1,3 +1,5 @@
+const { escape } = require('./utils')
+
 function formatMovies(movie) {
   const { data: info, download } = movie
 
@@ -21,10 +23,6 @@ function formatMovies(movie) {
   ].join('\n')
 
   return { text, buttons }
-}
-
-function escape(text) {
-  return String(text).replace(/[_*[\]()~`>#+=|{}.!\\-]/g, '\\$&')
 }
 
 module.exports = { formatMovies }

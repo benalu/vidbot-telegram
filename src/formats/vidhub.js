@@ -1,3 +1,5 @@
+const { escape } = require('./utils')
+
 function formatVidhub(data) {
   const { data: info, download, sites } = data
 
@@ -14,10 +16,6 @@ function formatVidhub(data) {
   ].join('\n')
 
   return { text, buttons }
-}
-
-function escape(text) {
-  return String(text).replace(/[_*[\]()~`>#+=|{}.!\\-]/g, '\\$&')
 }
 
 module.exports = { formatVidhub }

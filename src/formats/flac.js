@@ -1,3 +1,5 @@
+const { escape } = require('./utils')
+
 function formatFlac(entry) {
   const { data: info, download } = entry
 
@@ -15,10 +17,6 @@ function formatFlac(entry) {
   ].join('\n')
 
   return { text, buttons }
-}
-
-function escape(text) {
-  return String(text).replace(/[_*[\]()~`>#+=|{}.!\\-]/g, '\\$&')
 }
 
 module.exports = { formatFlac }
