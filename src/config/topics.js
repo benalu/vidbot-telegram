@@ -7,11 +7,11 @@ const GROUP_TOPICS = {
     flac:      process.env.TELEGRAM_THREAD_FLAC,
     apk:       process.env.TELEGRAM_THREAD_APK,
     vidhub:    process.env.TELEGRAM_THREAD_VIDHUB,
-    tiktok:    process.env.TELEGRAM_THREAD_TIKTOK,
     spotify:   process.env.TELEGRAM_THREAD_SPOTIFY,
-    instagram: process.env.TELEGRAM_THREAD_INSTAGRAM,
-    twitter:   process.env.TELEGRAM_THREAD_TWITTER,
-    threads:   process.env.TELEGRAM_THREAD_THREADS,
+    tiktok:    process.env.TELEGRAM_THREAD_SOCIAL,
+    instagram: process.env.TELEGRAM_THREAD_SOCIAL,
+    twitter:   process.env.TELEGRAM_THREAD_SOCIAL,
+    threads:   process.env.TELEGRAM_THREAD_SOCIAL,
   }
 }
 

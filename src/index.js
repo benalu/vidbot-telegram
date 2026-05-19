@@ -1,23 +1,17 @@
 require('dotenv').config()
 const { Telegraf } = require('telegraf')
 const GROUP_TOPICS = require('./config/topics')
-
-const { handleTiktok, handleSpotify, handleInstagram, handleTwitter, handleThreads } = require('./handlers/content')
-const { handleVidhub }     = require('./handlers/vidhub')
-const { handleMovies }     = require('./handlers/movies')
-const { handleFlac }       = require('./handlers/flac')
-const { handleAppAndroid } = require('./handlers/app')
-const { handleLeakcheck }  = require('./handlers/leakcheck')
+const COMMANDS     = require('./config/commands')
+const { handleHelp } = require('./handlers/help')
 
 // ---------------------------------------------------------------------------
-// Validasi env saat startup — fail fast daripada crash saat command pertama
+// Env validation at startup — fail fast
 // ---------------------------------------------------------------------------
 const REQUIRED_ENV = [
   'TELEGRAM_TOKEN', 'API_URL', 'API_KEY', 'TELEGRAM_GROUP_ID',
   'TELEGRAM_THREAD_LEAKCHECK', 'TELEGRAM_THREAD_MOVIES', 'TELEGRAM_THREAD_FLAC',
-  'TELEGRAM_THREAD_APK', 'TELEGRAM_THREAD_VIDHUB', 'TELEGRAM_THREAD_TIKTOK',
-  'TELEGRAM_THREAD_SPOTIFY', 'TELEGRAM_THREAD_INSTAGRAM',
-  'TELEGRAM_THREAD_TWITTER', 'TELEGRAM_THREAD_THREADS',
+  'TELEGRAM_THREAD_APK', 'TELEGRAM_THREAD_VIDHUB', 'TELEGRAM_THREAD_SOCIAL',
+  'TELEGRAM_THREAD_SPOTIFY',
 ]
 const missingEnv = REQUIRED_ENV.filter(k => !process.env[k])
 if (missingEnv.length) {
@@ -26,7 +20,7 @@ if (missingEnv.length) {
 }
 
 // ---------------------------------------------------------------------------
-// Rate limiter — in-memory, per user per command, 5 detik cooldown
+// Rate limiter — in-memory, per user per command, 5s cooldown
 // ---------------------------------------------------------------------------
 const cooldowns = new Map()
 
@@ -38,8 +32,7 @@ function isRateLimited(userId, command, ms = 5000) {
   return false
 }
 
-// Bersihkan cooldowns yang sudah expired setiap 10 menit
-// supaya Map tidak tumbuh tak terbatas
+// Cleanup expired cooldowns every 10 minutes
 setInterval(() => {
   const cutoff = Date.now() - 60_000
   for (const [key, ts] of cooldowns) {
@@ -48,26 +41,10 @@ setInterval(() => {
 }, 10 * 60 * 1000)
 
 // ---------------------------------------------------------------------------
-// Logger terstruktur
+// Structured logger
 // ---------------------------------------------------------------------------
 function log(level, data) {
   console[level === 'error' ? 'error' : 'log'](JSON.stringify({ ts: new Date().toISOString(), ...data }))
-}
-
-// ---------------------------------------------------------------------------
-// Commands map
-// ---------------------------------------------------------------------------
-const COMMANDS = {
-  leak:    { topic: 'leakcheck', handler: handleLeakcheck,  requiresArg: true },
-  spot:    { topic: 'spotify',   handler: handleSpotify,    requiresArg: true },
-  tik:     { topic: 'tiktok',    handler: handleTiktok,     requiresArg: true },
-  inst:    { topic: 'instagram', handler: handleInstagram,  requiresArg: true },
-  twit:    { topic: 'twitter',   handler: handleTwitter,    requiresArg: true },
-  threads: { topic: 'threads',   handler: handleThreads,    requiresArg: true },
-  vids:    { topic: 'vidhub',    handler: handleVidhub,     requiresArg: true },
-  apk:     { topic: 'apk',       handler: handleAppAndroid, requiresArg: true },
-  movie:   { topic: 'movies',    handler: handleMovies,     requiresArg: true },
-  flac:    { topic: 'flac',      handler: handleFlac,       requiresArg: true },
 }
 
 // ---------------------------------------------------------------------------
@@ -80,39 +57,57 @@ function createHandler(commandName, { topic, handler, requiresArg }) {
     const userId   = ctx.from?.id
     const topics   = GROUP_TOPICS[chatId]
 
-    // Grup tidak dikenal → ignore
+    // Unknown group → ignore
     if (!topics) return
 
-    // Command di topik yang salah → teguran
+    // Override ctx.reply — semua balasan otomatis reply ke pesan user
+    const messageId  = ctx.message.message_id
+    const originalReply        = ctx.reply.bind(ctx)
+    const originalReplyWithPhoto = ctx.replyWithPhoto.bind(ctx)
+
+    ctx.reply = (text, opts = {}) => originalReply(text, {
+      ...opts,
+      reply_parameters: { message_id: messageId, allow_sending_without_reply: true }
+      
+    })
+    ctx.replyWithPhoto = (photo, opts = {}) => originalReplyWithPhoto(photo, {
+      ...opts,
+      reply_parameters: { message_id: messageId, allow_sending_without_reply: true }
+    })
+
+    // Wrong topic → nudge with link to correct topic
     const allowedThread = String(topics[topic])
     if (threadId !== allowedThread) {
-      return ctx.reply('❌ Command ini hanya bisa digunakan di topik yang sesuai', {
-        message_thread_id: ctx.message.message_thread_id
-      })
+      const cleanChatId = chatId.replace('-100', '')
+      const topicLink   = `https://t.me/c/${cleanChatId}/${allowedThread}`
+      return ctx.reply(
+        `❌ */${commandName}* is not available here\\.\n\n👉 [Use it in the correct topic](${topicLink})`,
+        { parse_mode: 'MarkdownV2', message_thread_id: ctx.message.message_thread_id }
+      )
     }
 
     // Rate limit
     if (isRateLimited(userId, commandName)) {
-      return ctx.reply('⏳ Tunggu sebentar sebelum request lagi\\.', {
+      return ctx.reply('⏳ Please wait a moment before sending another request\\.', {
         parse_mode: 'MarkdownV2',
         message_thread_id: ctx.message.message_thread_id
       })
     }
 
-    // Cek argument
+    // Argument check
     const args = ctx.message.text.split(/\s+/).slice(1)
     if (requiresArg && args.length === 0) {
-      return ctx.reply(`❌ Argument diperlukan\\. Contoh: \`/${commandName} https://\\.\\.\\.\\.\``, {
+      return ctx.reply(`❌ Argument required\\. Example: \`/${commandName} https://\\.\\.\\.\\.\``, {
         parse_mode: 'MarkdownV2',
         message_thread_id: ctx.message.message_thread_id
       })
     }
 
-    // Typing indicator loop — terus aktif selama handler berjalan
+    // Typing indicator loop — stays active while handler runs
     const typingInterval = setInterval(() => {
       ctx.sendChatAction('typing', {
         message_thread_id: ctx.message.message_thread_id
-      }).catch(() => {}) // ignore error kalau chat sudah tidak aktif
+      }).catch(() => {})
     }, 4000)
     await ctx.sendChatAction('typing', {
       message_thread_id: ctx.message.message_thread_id
@@ -150,16 +145,19 @@ function createHandler(commandName, { topic, handler, requiresArg }) {
 }
 
 // ---------------------------------------------------------------------------
-// Register semua command
+// Register commands
 // ---------------------------------------------------------------------------
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN)
+
+// /help available in all topics — no thread validation needed
+bot.command('help', handleHelp)
 
 for (const [name, config] of Object.entries(COMMANDS)) {
   bot.command(name, createHandler(name, config))
 }
 
 bot.launch()
-log('info', { status: 'started', commands: Object.keys(COMMANDS) })
+log('info', { status: 'started', commands: ['help', ...Object.keys(COMMANDS)] })
 
 process.once('SIGINT',  () => bot.stop('SIGINT'))
 process.once('SIGTERM', () => bot.stop('SIGTERM'))

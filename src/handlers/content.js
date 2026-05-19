@@ -1,23 +1,21 @@
 const api = require('../api/client')
+const { normalizeUrl } = require('../formats/utils')
 const { formatTiktok, formatSpotify, formatInstagram, formatTwitter, formatThreads } = require('../formats/content')
-
-function isValidUrl(str) {
-  try {
-    const url = new URL(str)
-    return url.protocol === 'http:' || url.protocol === 'https:'
-  } catch {
-    return false
-  }
-}
 
 function replyOpts(ctx) {
   return { message_thread_id: ctx.message.message_thread_id }
 }
 
+// Ekstrak dan normalisasi URL dari teks command, return null kalau tidak valid
+function parseUrl(ctx) {
+  const raw = ctx.message.text.split(/\s+/)[1]
+  return normalizeUrl(raw)
+}
+
 async function handleTiktok(ctx) {
-  const url = ctx.message.text.split(/\s+/)[1]
-  if (!isValidUrl(url)) {
-    return ctx.reply('❌ URL tidak valid. Contoh: `/tik https://vt.tiktok.com/...`', {
+  const url = parseUrl(ctx)
+  if (!url) {
+    return ctx.reply('❌ URL tidak valid\\. Contoh: `/tik tiktok\\.com/video/\\.\\.\\.`', {
       parse_mode: 'MarkdownV2',
       ...replyOpts(ctx)
     })
@@ -32,9 +30,9 @@ async function handleTiktok(ctx) {
 }
 
 async function handleSpotify(ctx) {
-  const url = ctx.message.text.split(/\s+/)[1]
-  if (!isValidUrl(url)) {
-    return ctx.reply('❌ URL tidak valid. Contoh: `/spot https://open.spotify.com/track/...`', {
+  const url = parseUrl(ctx)
+  if (!url) {
+    return ctx.reply('❌ URL tidak valid\\. Contoh: `/spot open\\.spotify\\.com/track/\\.\\.\\.`', {
       parse_mode: 'MarkdownV2',
       ...replyOpts(ctx)
     })
@@ -49,9 +47,9 @@ async function handleSpotify(ctx) {
 }
 
 async function handleInstagram(ctx) {
-  const url = ctx.message.text.split(/\s+/)[1]
-  if (!isValidUrl(url)) {
-    return ctx.reply('❌ URL tidak valid. Contoh: `/inst https://www.instagram.com/p/...`', {
+  const url = parseUrl(ctx)
+  if (!url) {
+    return ctx.reply('❌ URL tidak valid\\. Contoh: `/inst instagram\\.com/p/\\.\\.\\.`', {
       parse_mode: 'MarkdownV2',
       ...replyOpts(ctx)
     })
@@ -66,9 +64,9 @@ async function handleInstagram(ctx) {
 }
 
 async function handleTwitter(ctx) {
-  const url = ctx.message.text.split(/\s+/)[1]
-  if (!isValidUrl(url)) {
-    return ctx.reply('❌ URL tidak valid. Contoh: `/twit https://x.com/...`', {
+  const url = parseUrl(ctx)
+  if (!url) {
+    return ctx.reply('❌ URL tidak valid\\. Contoh: `/twit x\\.com/user/status/\\.\\.\\.`', {
       parse_mode: 'MarkdownV2',
       ...replyOpts(ctx)
     })
@@ -83,9 +81,9 @@ async function handleTwitter(ctx) {
 }
 
 async function handleThreads(ctx) {
-  const url = ctx.message.text.split(/\s+/)[1]
-  if (!isValidUrl(url)) {
-    return ctx.reply('❌ URL tidak valid. Contoh: `/threads https://www.threads.net/...`', {
+  const url = parseUrl(ctx)
+  if (!url) {
+    return ctx.reply('❌ URL tidak valid\\. Contoh: `/threads threads\\.net/\\@user/post/\\.\\.\\.`', {
       parse_mode: 'MarkdownV2',
       ...replyOpts(ctx)
     })

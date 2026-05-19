@@ -1,4 +1,5 @@
 const api = require('../api/client')
+const { normalizeUrl } = require('../formats/utils')
 const { formatVidhub } = require('../formats/vidhub')
 
 const VIDHUB_SITES = {
@@ -11,20 +12,21 @@ const VIDHUB_SITES = {
 }
 
 async function handleVidhub(ctx) {
-  const url = ctx.message.text.split(/\s+/)[1]
+  const raw = ctx.message.text.split(/\s+/)[1]
+  const url = normalizeUrl(raw)
 
-  let hostname
-  try {
-    hostname = new URL(url).hostname.replace('www.', '')
-  } catch {
+  if (!url) {
     return ctx.reply('❌ URL tidak valid', {
       message_thread_id: ctx.message.message_thread_id
     })
   }
 
+  const hostname = new URL(url).hostname.replace('www.', '')
   const site = VIDHUB_SITES[hostname]
+
   if (!site) {
     return ctx.reply(`❌ Domain \`${hostname}\` tidak didukung`, {
+      parse_mode: 'MarkdownV2',
       message_thread_id: ctx.message.message_thread_id
     })
   }
