@@ -18,21 +18,14 @@ function escape(text) {
  */
 function normalizeUrl(str) {
   if (!str) return null
-  let input = str.trim()
+  const input = str.trim()
 
-  // Sudah ada protocol yang valid → langsung validasi
-  if (/^https?:\/\//i.test(input)) {
-    try {
-      new URL(input)
-      return input
-    } catch {
-      return null
-    }
-  }
+  // Harus ada protocol eksplisit atau terlihat seperti domain (ada titik + TLD)
+  const looksLikeDomain = /^(https?:\/\/)|(\S+\.\S{2,}(\/\S*)?$)/i.test(input)
+  if (!looksLikeDomain) return null
 
-  // Coba tambah https:// di depan
+  const withPrefix = /^https?:\/\//i.test(input) ? input : `https://${input}`
   try {
-    const withPrefix = `https://${input}`
     new URL(withPrefix)
     return withPrefix
   } catch {

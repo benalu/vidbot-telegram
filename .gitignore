@@ -57,3 +57,5 @@ tmp/
 temp/
 
 test.http
+.cache/
+data/

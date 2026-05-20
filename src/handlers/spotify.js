@@ -1,134 +1,213 @@
-const fs      = require('fs')
-const path    = require('path')
-const https   = require('https')
-const http    = require('http')
-const os      = require('os')
-const api     = require('../api/client')
-const { escape, normalizeUrl } = require('../formats/utils')
+const axios = require('axios')
+const api   = require('../api/client')
+const { escape, normalizeUrl }              = require('../formats/utils')
+const { getTrack, saveTrack, searchTracks } = require('../utils/db')
+const { uploadToR2, trackKey } = require('../utils/r2')
+const { notify } = require('./admin')
 
-// ---------------------------------------------------------------------------
-// Cache file_id — in-memory, per track_id
-// Kalau lagu sudah pernah diupload ke Telegram, skip download & upload ulang
-// ---------------------------------------------------------------------------
-const fileIdCache = new Map()
+const pendingUploads = new Map()
 
-// ---------------------------------------------------------------------------
-// Download file dari URL ke path lokal, ikuti redirect secara rekursif
-// ---------------------------------------------------------------------------
-function downloadFile(url, destPath, redirectCount = 0) {
-  if (redirectCount > 5) return Promise.reject(new Error('Too many redirects'))
 
-  return new Promise((resolve, reject) => {
-    const proto = url.startsWith('https') ? https : http
-    const file  = fs.createWriteStream(destPath)
+async function getStreamWithSize(url) {
+  const res = await axios.get(url, {
+    responseType: 'stream',
+    timeout: 60_000,
+    maxRedirects: 5,
+  })
+  const size = parseInt(res.headers['content-length']) || null
+  return { stream: res.data, size }
+}
+function buildAudioOpts(info, ctx) {
+  return {
+    title:      info.title  || 'Track',
+    performer:  info.artist || info.author || 'Unknown',
+    thumbnail:  info.thumbnail ? { url: info.thumbnail } : undefined,
+    message_thread_id: ctx.message.message_thread_id,
+    reply_parameters: {
+      message_id: ctx.message.message_id,
+      allow_sending_without_reply: true,
+    },
+  }
+}
 
-    proto.get(url, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        file.close()
-        fs.unlink(destPath, () => {})
-        return downloadFile(res.headers.location, destPath, redirectCount + 1)
-          .then(resolve).catch(reject)
-      }
+function replyOpts(ctx) {
+  return {
+    parse_mode: 'MarkdownV2',
+    message_thread_id: ctx.message.message_thread_id,
+    reply_parameters: {
+      message_id: ctx.message.message_id,
+      allow_sending_without_reply: true,
+    },
+  }
+}
 
-      if (res.statusCode !== 200) {
-        file.close()
-        fs.unlink(destPath, () => {})
-        return reject(new Error(`HTTP ${res.statusCode}`))
-      }
+// ── Search: tampilkan daftar tombol dulu ──────────────────────────────────────
+async function handleSearch(ctx, keyword) {
+  const results = searchTracks(keyword)
 
-      res.pipe(file)
-      file.on('finish', () => file.close(resolve))
-      file.on('error', (err) => {
-        fs.unlink(destPath, () => {})
-        reject(err)
-      })
-    }).on('error', (err) => {
-      fs.unlink(destPath, () => {})
-      reject(err)
-    })
+  if (!results.length) {
+    return ctx.reply(
+      `\\[ NOT FOUND \\]\n` +
+      `No cached songs found for: *${escape(keyword)}*\n\n` +
+      `_The collection is still empty\\. Send a Spotify track link first:_\n` +
+      `\`/spot open\\.spotify\\.com/track/\\.\\.\\.\``,
+      replyOpts(ctx)
+    )
+  }
+
+  // Satu tombol per baris: "Judul — Artist"
+  const buttons = results.map(track => ([{
+    text:          `${track.title} — ${track.artist}`,
+    callback_data: `spot:${track.track_id}`,
+  }]))
+
+  await ctx.reply(
+    `\\[ RESULT \\] *${results.length} found* for _${escape(keyword)}_\n_Pilih lagu di bawah:_`,
+    {
+      ...replyOpts(ctx),
+      reply_markup: { inline_keyboard: buttons },
+    }
+  )
+}
+
+// ── Callback: user pilih tombol → kirim audio ────────────────────────────────
+async function handleSpotifyCallback(ctx) {
+  const trackId = ctx.callbackQuery.data.replace('spot:', '')
+  const track   = getTrack(trackId)
+
+  await ctx.answerCbQuery()
+
+  if (!track) {
+    return ctx.answerCbQuery('❌ Track not found in cache.', { show_alert: true })
+  }
+
+  await ctx.replyWithAudio(track.file_id, {
+    title:     track.title,
+    performer: track.artist,
+    thumbnail: track.thumbnail ? { url: track.thumbnail } : undefined,
+    message_thread_id: ctx.callbackQuery.message.message_thread_id,
   })
 }
 
-// ---------------------------------------------------------------------------
-// Handler
-// ---------------------------------------------------------------------------
-async function handleSpotify(ctx) {
-  const raw = ctx.message.text.split(/\s+/)[1]
-  const url = normalizeUrl(raw)
-
-  if (!url) {
-    return ctx.reply('❌ Invalid URL\\. Example: `/spot open\\.spotify\\.com/track/\\.\\.\\.`', {
-      parse_mode: 'MarkdownV2',
-      message_thread_id: ctx.message.message_thread_id
-    })
-  }
-
-  const data           = await api.contentSpotify(url)
-  const { data: info, download } = data
-  const trackId        = info.track_id || null
-  const safeTitle      = info.title || 'Track'
-  const safeArtist     = info.author || 'Unknown'
-
-  const caption = [
-    `🎵 *${escape(safeTitle)}*`,
-    ``,
-    `👤 *Artist:* ${escape(safeArtist)}`,
-    `⏱ *Duration:* ${escape(info.duration || 'N/A')}`,
-    `🎚 *Quality:* ${escape(info.quality || 'HQ')}`,
-  ].join('\n')
-
-  const audioOpts = {
-    caption,
-    parse_mode:  'MarkdownV2',
-    title:       safeTitle,
-    performer:   safeArtist,
-    thumbnail:   info.thumbnail ? { url: info.thumbnail } : undefined,
-    message_thread_id: ctx.message.message_thread_id,
-  }
-
-  // ── Cache hit: kirim ulang pakai file_id tanpa download ──────────────────
-  if (trackId && fileIdCache.has(trackId)) {
-    await ctx.replyWithAudio(fileIdCache.get(trackId), audioOpts)
-    return
-  }
-
-  // ── Cache miss: feedback dulu, lalu download ──────────────────────────────
-  const waitMsg = await ctx.reply('⏳ Downloading track, please wait\\.\\.\\.', {
-    parse_mode: 'MarkdownV2',
-    message_thread_id: ctx.message.message_thread_id
-  })
-
-  const destPath   = path.join(os.tmpdir(), `${trackId || Date.now()}.mp3`)
-  const primaryUrl = download.server_2 || download.original
-  const fallbackUrl = download.server_2 ? download.original : null
+// ── URL: download + upload ────────────────────────────────────────────────────
+async function handleUrl(ctx, url) {
+  const waitMsg = await ctx.reply('_Processing audio, please wait\\.\\.\\._', replyOpts(ctx))
 
   try {
-    // Download — coba primary, fallback ke original
-    try {
-      await downloadFile(primaryUrl, destPath)
-    } catch {
-      if (fallbackUrl) {
-        await downloadFile(fallbackUrl, destPath)
-      } else {
-        throw new Error('All download sources failed')
+    const data                     = await api.contentSpotify(url)
+    const { data: info, download } = data
+    const trackId                  = info.track_id || null
+    const safeTitle                = info.title    || 'Track'
+    const safeArtist               = info.author   || 'Unknown'
+
+    const audioOpts = buildAudioOpts({ ...info, artist: safeArtist }, ctx)
+
+    // Cache hit
+    if (trackId) {
+      const cached = getTrack(trackId)
+      if (cached) {
+        await ctx.replyWithAudio(cached.file_id, audioOpts)
+        notify(ctx.telegram,
+          `⚡ *Cache hit*\n` +
+          `*${escape(cached.title)}* — ${escape(cached.artist)}\n` +
+          `👤 @${escape(ctx.from?.username || String(ctx.from?.id))}`
+        ).catch(() => {})
+        return
       }
     }
 
-    // Upload ke Telegram
-    const sent = await ctx.replyWithAudio(
-      { source: destPath, filename: `${safeTitle}.mp3` },
-      audioOpts
-    )
-
-    // Simpan file_id ke cache untuk request berikutnya
-    if (trackId && sent?.audio?.file_id) {
-      fileIdCache.set(trackId, sent.audio.file_id)
+    // Sedang diproses user lain
+    if (trackId && pendingUploads.has(trackId)) {
+      const fileId = await pendingUploads.get(trackId)
+      await ctx.replyWithAudio(fileId, audioOpts)
+      return
     }
+
+    const candidates = [download.server_2, download.original, download.server_1].filter(Boolean)
+
+    const uploadPromise = (async () => {
+    let lastErr
+    for (const candidate of candidates) {
+      try {
+        // Download ke buffer sekali — dipakai untuk Telegram + R2 sekaligus
+        const res    = await axios.get(candidate, { responseType: 'arraybuffer', timeout: 60_000, maxRedirects: 5 })
+        const buffer = Buffer.from(res.data)
+        const size   = buffer.length
+
+        // Upload ke Telegram + R2 paralel
+        const key = trackKey(trackId || Date.now().toString(), safeTitle, safeArtist)
+        const [sent, r2Url] = await Promise.all([
+          ctx.replyWithAudio(
+            { source: buffer, filename: `${safeTitle}.mp3` },
+            audioOpts
+          ),
+          uploadToR2(buffer, key, 'audio/mpeg', size),
+        ])
+
+        const fileId = sent?.audio?.file_id
+        if (trackId && fileId) {
+          saveTrack({
+            track_id:  trackId,
+            file_id:   fileId,
+            title:     safeTitle,
+            artist:    safeArtist,
+            duration:  info.duration  || null,
+            quality:   info.quality   || null,
+            thumbnail: info.thumbnail || null,
+            file_size: size,
+            r2_url:    r2Url,
+          })
+          notify(ctx.telegram,
+            `🎵 *New track cached*\n` +
+            `*${escape(safeTitle)}* — ${escape(safeArtist)}\n` +
+            `👤 @${escape(ctx.from?.username || String(ctx.from?.id))}`
+          ).catch(() => {})
+        }
+        return fileId
+      } catch (err) {
+        lastErr = err
+        console.warn(`[spotify] failed: ${candidate} — ${err.message}`)
+      }
+    }
+    throw new Error(`All sources failed: ${lastErr.message}`)
+  })()
+
+    if (trackId) {
+      pendingUploads.set(trackId, uploadPromise)
+      uploadPromise.finally(() => pendingUploads.delete(trackId))
+    }
+
+    await uploadPromise
+
+  } catch (error) {
+    await ctx.reply(
+      `\\[ ERROR \\]\nFailed to process track: _${escape(error.message)}_`,
+      replyOpts(ctx)
+    )
   } finally {
-    // Hapus file temp & pesan "please wait" apapun hasilnya
-    fs.unlink(destPath, () => {})
     ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
   }
 }
 
-module.exports = { handleSpotify }
+// ── Entry point ───────────────────────────────────────────────────────────────
+async function handleSpotify(ctx) {
+  const arg = ctx.message.text.split(/\s+/).slice(1).join(' ').trim()
+
+  if (!arg) {
+    return ctx.reply(
+      `\\[ INFO \\]\nPlease provide a song name or a Spotify link\\.\n\n` +
+      `*URL Example:*\n\`/spot open\\.spotify\\.com/track/\\.\\.\\.\`\n\n` +
+      `*Title Example:*\n\`/spot Dirimu Yang Dulu\``,
+      replyOpts(ctx)
+    )
+  }
+
+  const url = normalizeUrl(arg)
+  if (url) {
+    await handleUrl(ctx, url)
+  } else {
+    await handleSearch(ctx, arg)
+  }
+}
+
+module.exports = { handleSpotify, handleSpotifyCallback }

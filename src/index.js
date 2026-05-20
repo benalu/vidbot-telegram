@@ -4,6 +4,9 @@ const GROUP_TOPICS = require('./config/topics')
 const COMMANDS     = require('./config/commands')
 const { handleHelp } = require('./handlers/help')
 
+const { handleSpotifyCallback } = require('./handlers/spotify')
+const { registerAdminHandlers } = require('./handlers/admin')
+
 // ---------------------------------------------------------------------------
 // Env validation at startup — fail fast
 // ---------------------------------------------------------------------------
@@ -11,7 +14,8 @@ const REQUIRED_ENV = [
   'TELEGRAM_TOKEN', 'API_URL', 'API_KEY', 'TELEGRAM_GROUP_ID',
   'TELEGRAM_THREAD_LEAKCHECK', 'TELEGRAM_THREAD_MOVIES', 'TELEGRAM_THREAD_FLAC',
   'TELEGRAM_THREAD_APK', 'TELEGRAM_THREAD_VIDHUB', 'TELEGRAM_THREAD_SOCIAL',
-  'TELEGRAM_THREAD_SPOTIFY',
+  'TELEGRAM_THREAD_SPOTIFY', 'TELEGRAM_ADMIN_GROUP_ID', 'TELEGRAM_OWNER_ID',
+  'R2_ENDPOINT', 'R2_BUCKET', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_PUBLIC_URL',
 ]
 const missingEnv = REQUIRED_ENV.filter(k => !process.env[k])
 if (missingEnv.length) {
@@ -155,6 +159,42 @@ bot.command('help', handleHelp)
 for (const [name, config] of Object.entries(COMMANDS)) {
   bot.command(name, createHandler(name, config))
 }
+
+bot.catch((err, ctx) => {
+  const apiCode    = err?.response?.data?.code
+  const apiMessage = err?.response?.data?.message
+  const SAFE_CODES = ['NOT_FOUND', 'BAD_REQUEST', 'RATE_LIMIT']
+  const isTimeout  = err.message?.toLowerCase().includes('timeout')
+
+  const userMessage = isTimeout
+    ? 'Request timed out. The server is taking too long — try again in a moment.'
+    : apiCode && SAFE_CODES.includes(apiCode)
+      ? apiMessage
+      : 'Something went wrong. Please try again later.'
+
+  log('error', { msg: err.message, update: ctx?.update?.update_id })
+
+  ctx.reply(`❌ ${userMessage}`, {
+    message_thread_id: ctx.message?.message_thread_id
+  }).catch(() => {})
+})
+
+bot.catch((err, ctx) => {
+  const isTimeout = err.message?.toLowerCase().includes('timeout')
+  const userMessage = isTimeout
+    ? 'Request timed out\\. Please try again in a moment\\.'
+    : 'Something went wrong\\. Please try again later\\.'
+
+  log('error', { msg: err.message, update: ctx?.update?.update_id })
+
+  ctx.reply(`❌ ${userMessage}`, {
+    parse_mode: 'MarkdownV2',
+    message_thread_id: ctx.message?.message_thread_id
+  }).catch(() => {})
+})
+
+bot.action(/^spot:/, handleSpotifyCallback)
+registerAdminHandlers(bot)
 
 bot.launch()
 log('info', { status: 'started', commands: ['help', ...Object.keys(COMMANDS)] })
