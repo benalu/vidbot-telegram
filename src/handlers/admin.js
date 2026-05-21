@@ -1,4 +1,5 @@
 const api = require('../api/client')
+const logger = require('../utils/logger')
 const { escape, normalizeUrl }                           = require('../formats/utils')
 const { getTrack, saveTrack, deleteTrack,
         listTracks, countTracks, getStats,
@@ -10,9 +11,6 @@ const OWNER_ID     = String(process.env.TELEGRAM_OWNER_ID)
 const PAGE_SIZE    = 10
 
 let isSyncing = false
-
-// Tunggu input berikutnya dari owner — simpan state per chat
-const awaitingInput = new Map()
 
 function formatSize(bytes) {
   if (!bytes) return 'N/A'
@@ -66,31 +64,78 @@ async function handleDbStats(ctx) {
 }
 
 // ── /listtrack [page] ─────────────────────────────────────────────────────────
+function buildTrackListMessage(page) {
+  const total  = countTracks()
+  const pages  = Math.ceil(total / PAGE_SIZE)
+  const offset = (page - 1) * PAGE_SIZE
+  const tracks = listTracks(PAGE_SIZE, offset)
+
+  if (!tracks.length) return { text: null, buttons: null, pages: 0 }
+
+  const lines = tracks.map((t, i) =>
+    `${offset + i + 1}\\. *${escape(t.title)}* — ${escape(t.artist)}\n` +
+    `    ${escape(t.duration || 'N/A')}  ·  ${escape(formatSize(t.file_size))}  ·  ${t.r2_url ? '☁️ R2' : '❌ No R2'}\n` +
+    `    \`${t.track_id}\``
+  ).join('\n\n')
+
+  const text = (
+    `🎵 *Track List* \\(page ${page}/${pages}\\)\n\n` +
+    `${lines}\n\n` +
+    `_Total: ${total} tracks_`
+  )
+
+  // Bangun tombol navigasi
+  const nav = []
+  if (page > 1)     nav.push({ text: '◀️ Prev', callback_data: `lt:${page - 1}` })
+  if (page < pages) nav.push({ text: 'Next ▶️', callback_data: `lt:${page + 1}` })
+
+  const buttons = nav.length ? [nav] : []
+
+  return { text, buttons, pages }
+}
+
 async function handleListTrack(ctx) {
   if (!isAdmin(ctx)) return
 
-  const arg    = ctx.message.text.split(/\s+/)[1]
-  const page   = Math.max(1, parseInt(arg) || 1)
-  const offset = (page - 1) * PAGE_SIZE
-  const total  = countTracks()
-  const tracks = listTracks(PAGE_SIZE, offset)
-  const pages  = Math.ceil(total / PAGE_SIZE)
+  const arg  = ctx.message.text.split(/\s+/)[1]
+  const page = Math.max(1, parseInt(arg) || 1)
 
-  if (!tracks.length) {
+  const { text, buttons, pages } = buildTrackListMessage(page)
+
+  if (!text) {
     return ctx.reply('❌ Database kosong\\.', { parse_mode: 'MarkdownV2' })
   }
 
-  const lines = tracks.map((t, i) =>
-  `${offset + i + 1}\\. *${escape(t.title)}* — ${escape(t.artist)}\n` +
-  `    ${escape(t.duration || 'N/A')}  ·  ${escape(formatSize(t.file_size))}  ·  ${t.r2_url ? '☁️ R2' : '❌ No R2'}\n` +
-  `    \`${t.track_id}\``
-).join('\n\n')
+  await ctx.reply(text, {
+    parse_mode: 'MarkdownV2',
+    reply_markup: { inline_keyboard: buttons }
+  })
+}
 
-  await ctx.reply(
-    `🎵 *Track List* \\(page ${page}/${pages}\\)\n\n${lines}\n\n` +
-    `_Total: ${total} tracks_`,
-    { parse_mode: 'MarkdownV2' }
-  )
+// Callback handler untuk tombol pagination
+async function handleListTrackPage(ctx) {
+  const page = parseInt(ctx.callbackQuery.data.replace('lt:', ''))
+  if (!page || isNaN(page)) return ctx.answerCbQuery()
+
+  // Pastikan hanya admin yang bisa tekan tombol
+  const userId = String(ctx.from?.id)
+  if (userId !== OWNER_ID) {
+    return ctx.answerCbQuery('❌ Tidak diizinkan.', { show_alert: true })
+  }
+
+  const { text, buttons } = buildTrackListMessage(page)
+
+  if (!text) {
+    return ctx.answerCbQuery('❌ Halaman tidak ditemukan.', { show_alert: true })
+  }
+
+  // Edit pesan yang sama — tidak kirim pesan baru
+  await ctx.editMessageText(text, {
+    parse_mode: 'MarkdownV2',
+    reply_markup: { inline_keyboard: buttons }
+  }).catch(() => {})
+
+  await ctx.answerCbQuery()
 }
 
 // ── /findtrack <keyword> ──────────────────────────────────────────────────────
@@ -134,7 +179,7 @@ async function handleDelTrack(ctx) {
     // Hapus dari R2 kalau ada
     if (track.r2_url) {
       const key = track.r2_url.replace(`${process.env.R2_PUBLIC_URL}/`, '')
-      deleteFromR2(key).catch(err => console.warn(`[r2] delete failed: ${err.message}`))
+      deleteFromR2(key).catch(err => logger.warn({ event: 'r2_delete_failed', track_id: trackId, msg: err.message }))
     }
     await ctx.reply(
       `✅ Dihapus dari DB dan R2:\n*${escape(track.title)}* — ${escape(track.artist)}`,
@@ -145,19 +190,9 @@ async function handleDelTrack(ctx) {
   }
 }
 
-// ── /addtrack <spotify_url> ───────────────────────────────────────────────────
-async function handleAddTrack(ctx) {
+// ── <spotify_url> ───────────────────────────────────────────────────
+async function handleAddTrack(ctx, url) {
   if (!isAdmin(ctx)) return
-
-  const raw = ctx.message.text.split(/\s+/)[1]
-  const url = normalizeUrl(raw)
-
-  if (!url) {
-    return ctx.reply(
-      '❌ Masukkan URL Spotify yang valid\\.\n`/addtrack open\\.spotify\\.com/track/\\.\\.\\.`',
-      { parse_mode: 'MarkdownV2' }
-    )
-  }
 
   const data                     = await api.contentSpotify(url)
   const { data: info, download } = data
@@ -175,7 +210,6 @@ async function handleAddTrack(ctx) {
   const safeArtist = info.author || 'Unknown'
   const candidates = [download.server_2, download.original, download.server_1].filter(Boolean)
 
-  // 1. Download buffer dulu — ini yang cepat, aman di-await
   let buffer   = null
   let fileSize = null
   let lastErr  = null
@@ -192,7 +226,7 @@ async function handleAddTrack(ctx) {
       break
     } catch (err) {
       lastErr = err
-      console.warn(`[addtrack] download failed: ${candidate} — ${err.message}`)
+      logger.warn({ event: 'addtrack_download_failed', candidate, msg: err.message })
     }
   }
 
@@ -203,13 +237,12 @@ async function handleAddTrack(ctx) {
     )
   }
 
-  // 2. Konfirmasi ke admin langsung — handler selesai di sini, tidak ada timeout
-  await ctx.reply(
-    `⏳ Download selesai \\(${(fileSize / 1024).toFixed(0)} KB\\)\\. Uploading ke Telegram di background\\.\\.\\.`,
+  // Kirim status — akan dihapus setelah audio terkirim
+  const waitMsg = await ctx.reply(
+    `⏳ Download selesai \\(${(fileSize / 1024).toFixed(0)} KB\\)\\. Uploading ke Telegram\\.\\.\\.`,
     { parse_mode: 'MarkdownV2' }
   )
 
-  // 3. Upload Telegram + R2 + simpan DB — semua background, tidak blokir handler
   const key      = trackKey(trackId || Date.now().toString(), safeTitle, safeArtist)
   const audioOpts = {
     title:     safeTitle,
@@ -219,14 +252,15 @@ async function handleAddTrack(ctx) {
 
   ;(async () => {
     try {
-      // Upload ke Telegram — bisa lama, tapi tidak ada yang menunggu
       const sent   = await ctx.replyWithAudio(
         { source: buffer, filename: `${safeTitle}.mp3` },
         audioOpts
       )
       const fileId = sent?.audio?.file_id
 
-      // Simpan DB segera setelah dapat file_id
+      // Hapus pesan "Download selesai" setelah audio terkirim
+      ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
+
       if (trackId && fileId) {
         saveTrack({
           track_id:  trackId,
@@ -245,23 +279,25 @@ async function handleAddTrack(ctx) {
         )
       }
 
-      // R2 setelah Telegram selesai
       uploadToR2(buffer, key, 'audio/mpeg', fileSize)
         .then(r2Url => {
           if (trackId && r2Url) updateTrackR2(trackId, r2Url)
-          console.log(`[r2] admin upload ok: ${r2Url}`)
+          logger.info({ event: 'r2_upload', context: 'admin', url: r2Url })
         })
-        .catch(err => console.warn(`[r2] admin background upload failed: ${err.message}`))
+        .catch(err => {
+          logger.warn({ event: 'r2_upload_failed', context: 'admin', msg: err.message })
+        })
 
     } catch (err) {
-      console.error(`[addtrack] background upload error: ${err.message}`)
+      // Hapus waitMsg juga kalau gagal
+      ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
+      logger.error({ event: 'addtrack_upload_failed', msg: err.message })
       ctx.reply(
         `❌ Upload ke Telegram gagal: _${escape(err.message)}_`,
         { parse_mode: 'MarkdownV2' }
       ).catch(() => {})
     }
   })()
-  // Fungsi async IIFE di atas tidak di-await — handler langsung return di sini
 }
 
 // ── /syncr2 ───────────────────────────────────────────────────────────────────
@@ -347,10 +383,10 @@ async function handleSyncR2(ctx) {
 
           updateTrackR2(track.track_id, r2Url)
           success++
-          console.log(`[syncr2] ok (${i + 1}/${total}): ${track.title} — ${track.artist}`)
+          logger.info({ event: 'syncr2_ok', n: `${i + 1}/${total}`, track: track.title, artist: track.artist })
         } catch (err) {
           failed++
-          console.warn(`[syncr2] failed: ${track.track_id} — ${err.message}`)
+          logger.warn({ event: 'syncr2_failed', track_id: track.track_id, msg: err.message })
         }
       }
 
@@ -397,8 +433,28 @@ function registerAdminHandlers(bot) {
   bot.command('listtrack',  handleListTrack)
   bot.command('findtrack',  handleFindTrack)
   bot.command('deltrack',   handleDelTrack)
-  bot.command('addtrack',   handleAddTrack)
   bot.command('syncr2',     handleSyncR2)
+
+  // Pagination tombol listtrack
+  bot.action(/^lt:\d+$/, handleListTrackPage)
+
+  // Terima URL Spotify langsung tanpa command
+  bot.on('text', async (ctx) => {
+    const chatId = String(ctx.chat?.id)
+    if (chatId !== String(ADMIN_GROUP)) return
+    const text = ctx.message.text.trim()
+    if (text.startsWith('/')) return
+    const url = normalizeUrl(text)
+    if (!url) return
+    if (!url.includes('spotify.com')) return
+    if (!url.includes('/track/')) return
+    try {
+      await handleAddTrack(ctx, url)
+    } catch (err) {
+      logger.error({ event: 'addtrack_error', msg: err.message })
+      ctx.reply(`❌ ${escape(err.message)}`, { parse_mode: 'MarkdownV2' }).catch(() => {})
+    }
+  })
 }
 
 module.exports = { registerAdminHandlers, notify }

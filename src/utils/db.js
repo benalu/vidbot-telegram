@@ -71,6 +71,12 @@ const stmts = {
     WHERE r2_url IS NULL OR r2_url = ''
     ORDER BY created_at ASC
   `),
+  searchByWord: db.prepare(`
+    SELECT * FROM tracks
+    WHERE LOWER(title) LIKE ? OR LOWER(artist) LIKE ?
+    ORDER BY created_at DESC
+    LIMIT 10
+  `),
 }
 
 function getTrack(trackId) {
@@ -93,12 +99,7 @@ function searchTracks(keyword) {
   const words  = normalized.split(' ').filter(w => w.length > 1)
   const byWord = words.flatMap(w => {
     const wq = `%${w}%`
-    return db.prepare(`
-      SELECT * FROM tracks
-      WHERE LOWER(title) LIKE ? OR LOWER(artist) LIKE ?
-      ORDER BY created_at DESC
-      LIMIT 10
-    `).all(wq, wq)
+    return stmts.searchByWord.all(wq, wq)  
   })
 
   const exact = stmts.search.all(q, q)

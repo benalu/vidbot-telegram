@@ -1,22 +1,14 @@
-const axios = require('axios')
-const api   = require('../api/client')
-const { escape, normalizeUrl }              = require('../formats/utils')
+const axios  = require('axios')
+const api    = require('../api/client')
+const logger = require('../utils/logger')
+const { escape, normalizeUrl }                             = require('../formats/utils')
 const { getTrack, saveTrack, searchTracks, updateTrackR2 } = require('../utils/db')
-const { uploadToR2, trackKey } = require('../utils/r2')
-const { notify } = require('./admin')
+const { uploadToR2, trackKey }                             = require('../utils/r2')
+const { notify }                                           = require('./admin')
 
 const pendingUploads = new Map()
 
 
-async function getStreamWithSize(url) {
-  const res = await axios.get(url, {
-    responseType: 'stream',
-    timeout: 60_000,
-    maxRedirects: 5,
-  })
-  const size = parseInt(res.headers['content-length']) || null
-  return { stream: res.data, size }
-}
 function buildAudioOpts(info, ctx) {
   return {
     title:      info.title  || 'Track',
@@ -42,8 +34,38 @@ function replyOpts(ctx) {
 }
 
 // ── Search: tampilkan daftar tombol dulu ──────────────────────────────────────
+const SEARCH_PAGE_SIZE = 5
+
+function buildSearchMessage(results, keyword, page) {
+  const total   = results.length
+  const pages   = Math.ceil(total / SEARCH_PAGE_SIZE)
+  const offset  = (page - 1) * SEARCH_PAGE_SIZE
+  const slice   = results.slice(offset, offset + SEARCH_PAGE_SIZE)
+
+  // Tombol audio — satu per baris
+  const audioButtons = slice.map(track => ([{
+    text:          `${track.title} — ${track.artist}`,
+    callback_data: `spot:${track.track_id}`,
+  }]))
+
+  // Tombol navigasi prev/next — satu baris di bawah
+  const nav = []
+  if (page > 1)     nav.push({ text: '◀️ Prev', callback_data: `srch:${page - 1}:${keyword}` })
+  if (page < pages) nav.push({ text: 'Next ▶️', callback_data: `srch:${page + 1}:${keyword}` })
+
+  const buttons = nav.length ? [...audioButtons, nav] : audioButtons
+
+  const text = (
+    `\\[ RESULT \\] *${total} found* for _${escape(keyword)}_\n` +
+    `_Halaman ${page}/${pages} — pilih lagu di bawah:_`
+  )
+
+  return { text, buttons }
+}
+
 async function handleSearch(ctx, keyword) {
-  const results = searchTracks(keyword)
+  const safeKeyword = keyword.slice(0, 40).trim()
+  const results = searchTracks(safeKeyword)
 
   if (!results.length) {
     return ctx.reply(
@@ -55,19 +77,67 @@ async function handleSearch(ctx, keyword) {
     )
   }
 
-  // Satu tombol per baris: "Judul — Artist"
-  const buttons = results.map(track => ([{
-    text:          `${track.title} — ${track.artist}`,
-    callback_data: `spot:${track.track_id}`,
-  }]))
+  // Simpan ke cache untuk pagination
+  cacheSearch(ctx.from?.id, safeKeyword, results)
 
-  await ctx.reply(
-    `\\[ RESULT \\] *${results.length} found* for _${escape(keyword)}_\n_Pilih lagu di bawah:_`,
-    {
-      ...replyOpts(ctx),
-      reply_markup: { inline_keyboard: buttons },
-    }
-  )
+  const { text, buttons } = buildSearchMessage(results, safeKeyword, 1)
+
+  await ctx.reply(text, {
+    ...replyOpts(ctx),
+    reply_markup: { inline_keyboard: buttons },
+  })
+}
+
+const searchCache = new Map()
+
+function cacheSearch(userId, keyword, results) {
+  const key = `${userId}:${keyword}`
+  searchCache.set(key, { results, ts: Date.now() })
+
+  // Cleanup otomatis setelah 10 menit
+  setTimeout(() => searchCache.delete(key), 10 * 60 * 1000)
+}
+
+function getCachedSearch(userId, keyword) {
+  const key  = `${userId}:${keyword}`
+  const hit  = searchCache.get(key)
+  if (!hit) return null
+  if (Date.now() - hit.ts > 10 * 60 * 1000) {
+    searchCache.delete(key)
+    return null
+  }
+  return hit.results
+}
+
+async function handleSearchPage(ctx) {
+  // Format callback_data: srch:{page}:{keyword}
+  const raw     = ctx.callbackQuery.data
+  const match   = raw.match(/^srch:(\d+):(.+)$/)
+  if (!match) return ctx.answerCbQuery()
+
+  const page    = parseInt(match[1])
+  const keyword = match[2]
+  const userId  = ctx.from?.id
+
+  // Ambil dari cache dulu, kalau tidak ada query ulang
+  let results = getCachedSearch(userId, keyword)
+  if (!results) {
+    results = searchTracks(keyword)
+    if (results.length) cacheSearch(userId, keyword, results)
+  }
+
+  if (!results.length) {
+    return ctx.answerCbQuery('❌ Hasil tidak ditemukan.', { show_alert: true })
+  }
+
+  const { text, buttons } = buildSearchMessage(results, keyword, page)
+
+  await ctx.editMessageText(text, {
+    parse_mode: 'MarkdownV2',
+    reply_markup: { inline_keyboard: buttons },
+  }).catch(() => {})
+
+  await ctx.answerCbQuery()
 }
 
 // ── Callback: user pilih tombol → kirim audio ────────────────────────────────
@@ -142,7 +212,7 @@ async function handleUrl(ctx, url) {
         break
       } catch (err) {
         lastErr = err
-        console.warn(`[spotify] download failed: ${candidate} — ${err.message}`)
+        logger.warn({ event: 'spotify_download_failed', candidate, msg: err.message })
       }
     }
 
@@ -167,49 +237,63 @@ async function handleUrl(ctx, url) {
     }
 
     // Handler selesai setelah delete waitMsg — tidak ada lagi yang di-await
-    // replyWithAudio jalan di background IIFE
     ;(async () => {
-      try {
-        const sent   = await ctx.replyWithAudio(
-          { source: buffer, filename: `${safeTitle}.mp3` },
-          audioOpts
-        )
-        const fileId = sent?.audio?.file_id
+    try {
+      const sent   = await ctx.replyWithAudio(
+        { source: buffer, filename: `${safeTitle}.mp3` },
+        audioOpts
+      )
+      const fileId = sent?.audio?.file_id
 
-        resolveFileId(fileId)  // beri tahu pendingUploads
+      resolveFileId(fileId)
 
-        if (trackId && fileId) {
-          saveTrack({
-            track_id:  trackId,
-            file_id:   fileId,
-            title:     safeTitle,
-            artist:    safeArtist,
-            duration:  info.duration  || null,
-            quality:   info.quality   || null,
-            thumbnail: info.thumbnail || null,
-            file_size: size,
-            r2_url:    null,
-          })
-          notify(ctx.telegram,
-            `🎵 *New track cached*\n` +
-            `*${escape(safeTitle)}* — ${escape(safeArtist)}\n` +
-            `👤 @${escape(ctx.from?.username || String(ctx.from?.id))}`
-          ).catch(() => {})
-        }
-
-        // R2 setelah Telegram selesai — pure background
-        uploadToR2(buffer, key, 'audio/mpeg', size)
-          .then(r2Url => {
-            if (trackId && r2Url) updateTrackR2(trackId, r2Url)
-            console.log(`[r2] uploaded: ${r2Url}`)
-          })
-          .catch(err => console.warn(`[r2] background upload failed: ${err.message}`))
-
-      } catch (err) {
-        resolveFileId(null)
-        console.error(`[spotify] background upload error: ${err.message}`)
+      if (trackId && fileId) {
+        saveTrack({
+          track_id:  trackId,
+          file_id:   fileId,
+          title:     safeTitle,
+          artist:    safeArtist,
+          duration:  info.duration  || null,
+          quality:   info.quality   || null,
+          thumbnail: info.thumbnail || null,
+          file_size: size,
+          r2_url:    null,
+        })
+        notify(ctx.telegram,
+          `🎵 *New track cached*\n` +
+          `*${escape(safeTitle)}* — ${escape(safeArtist)}\n` +
+          `👤 @${escape(ctx.from?.username || String(ctx.from?.id))}`
+        ).catch(() => {})
       }
-    })()
+
+      // R2 — gagal atau berhasil, user tidak tahu sama sekali
+      uploadToR2(buffer, key, 'audio/mpeg', size)
+        .then(r2Url => {
+          if (trackId && r2Url) updateTrackR2(trackId, r2Url)
+          logger.info({ event: 'r2_upload', context: 'public', track: safeTitle })
+        })
+        .catch(err => {
+          // Hanya logger + admin — tidak ada yang ke user
+          logger.warn({ event: 'r2_upload_failed', track: safeTitle, msg: err.message })
+          notify(ctx.telegram,
+            `⚠️ *R2 upload gagal*\n` +
+            `*${escape(safeTitle)}* — ${escape(safeArtist)}\n` +
+            `_${escape(err.message)}_`
+          ).catch(() => {})
+        })
+
+    } catch (err) {
+      resolveFileId(null)
+      // Hanya logger + admin — user tidak dapat pesan error apapun
+      logger.error({ event: 'spotify_upload_failed', track: safeTitle, msg: err.message })
+      notify(ctx.telegram,
+        `❌ *Upload Telegram gagal*\n` +
+        `*${escape(safeTitle)}* — ${escape(safeArtist)}\n` +
+        `👤 @${escape(ctx.from?.username || String(ctx.from?.id))}\n` +
+        `_${escape(err.message)}_`
+      ).catch(() => {})
+    }
+  })()
     // IIFE tidak di-await — handler langsung lanjut ke finally
 
   } catch (error) {
@@ -243,4 +327,4 @@ async function handleSpotify(ctx) {
   }
 }
 
-module.exports = { handleSpotify, handleSpotifyCallback }
+module.exports = { handleSpotify, handleSpotifyCallback, handleSearchPage }

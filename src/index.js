@@ -4,8 +4,9 @@ const GROUP_TOPICS = require('./config/topics')
 const COMMANDS     = require('./config/commands')
 const { handleHelp } = require('./handlers/help')
 
-const { handleSpotifyCallback } = require('./handlers/spotify')
+const { handleSpotifyCallback, handleSearchPage } = require('./handlers/spotify')
 const { registerAdminHandlers } = require('./handlers/admin')
+const { setupProcessHandlers } = require('./utils/process')
 
 // ---------------------------------------------------------------------------
 // Env validation at startup — fail fast
@@ -47,9 +48,7 @@ setInterval(() => {
 // ---------------------------------------------------------------------------
 // Structured logger
 // ---------------------------------------------------------------------------
-function log(level, data) {
-  console[level === 'error' ? 'error' : 'log'](JSON.stringify({ ts: new Date().toISOString(), ...data }))
-}
+const logger = require('./utils/logger')
 
 // ---------------------------------------------------------------------------
 // Handler factory
@@ -120,7 +119,7 @@ function createHandler(commandName, { topic, handler, requiresArg }) {
     const start = Date.now()
     try {
       await handler(ctx)
-      log('info', { cmd: commandName, userId, ms: Date.now() - start, status: 'ok' })
+      logger.info({ cmd: commandName, userId, ms: Date.now() - start, status: 'ok' })
     } catch (err) {
       const apiCode    = err?.response?.data?.code
       const apiMessage = err?.response?.data?.message
@@ -130,7 +129,7 @@ function createHandler(commandName, { topic, handler, requiresArg }) {
         ? apiMessage
         : 'Something went wrong. Please try again later.'
 
-      log('error', {
+      logger.error({
         cmd: commandName,
         userId,
         ms: Date.now() - start,
@@ -138,6 +137,7 @@ function createHandler(commandName, { topic, handler, requiresArg }) {
         code: apiCode,
         msg: err.message
       })
+
 
       await ctx.reply(`❌ ${userMessage}`, {
         message_thread_id: ctx.message.message_thread_id
@@ -166,7 +166,7 @@ bot.catch((err, ctx) => {
   const apiMessage = err?.response?.data?.message
   const SAFE_CODES = ['NOT_FOUND', 'BAD_REQUEST', 'RATE_LIMIT']
 
-  log('error', { msg: err.message, update: ctx?.update?.update_id })
+  logger.error({ msg: err.message, update: ctx?.update?.update_id })
 
   // Timeout dari background IIFE — proses masih jalan, jangan ganggu user
   if (isTimeout) return
@@ -182,10 +182,9 @@ bot.catch((err, ctx) => {
 })
 
 bot.action(/^spot:/, handleSpotifyCallback)
+bot.action(/^srch:\d+:.+$/, handleSearchPage)
 registerAdminHandlers(bot)
 
+setupProcessHandlers(bot)
 bot.launch()
-log('info', { status: 'started', commands: ['help', ...Object.keys(COMMANDS)] })
-
-process.once('SIGINT',  () => bot.stop('SIGINT'))
-process.once('SIGTERM', () => bot.stop('SIGTERM'))
+logger.info({ status: 'started', commands: ['help', ...Object.keys(COMMANDS)] })
