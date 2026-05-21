@@ -4,7 +4,7 @@ const MAX_ENTRIES  = 2_000   // batas atas Map agar tidak leak memory
 
 const cooldowns = new Map()
 
-export function isRateLimited(userId, command, ms = COOLDOWN_MS) {
+function isRateLimited(userId, command, ms = COOLDOWN_MS) {
   const key  = `${userId}:${command}`
   const last = cooldowns.get(key) || 0
   if (Date.now() - last < ms) return true
@@ -27,3 +27,5 @@ setInterval(() => {
     if (ts < cutoff) cooldowns.delete(key)
   }
 }, 60_000)
+
+module.exports = { isRateLimited }

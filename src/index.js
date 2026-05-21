@@ -4,7 +4,8 @@ const GROUP_TOPICS = require('./config/topics')
 const COMMANDS     = require('./config/commands')
 const { handleHelp } = require('./handlers/help')
 
-const { handleSpotifyCallback, handleSearchPage } = require('./handlers/spotify')
+const { handleSpotifyCallback, handleSearchPage,
+        handleRandom, handleTop } = require('./handlers/spotify')
 const { registerAdminHandlers } = require('./handlers/admin')
 const { setupProcessHandlers } = require('./utils/process')
 
@@ -136,6 +137,10 @@ const bot = new Telegraf(process.env.TELEGRAM_TOKEN)
 
 // /help available in all topics — no thread validation needed
 bot.command('help', handleHelp)
+
+// /random, /top
+bot.command('random', createHandler('random', { topic: 'spotify', handler: handleRandom, requiresArg: false }))
+bot.command('top',    createHandler('top',    { topic: 'spotify', handler: handleTop,    requiresArg: false }))
 
 for (const [name, config] of Object.entries(COMMANDS)) {
   bot.command(name, createHandler(name, config))

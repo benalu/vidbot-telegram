@@ -2,7 +2,8 @@ const axios  = require('axios')
 const api    = require('../api/client')
 const logger = require('../utils/logger')
 const { escape, normalizeUrl }                             = require('../formats/utils')
-const { getTrack, saveTrack, searchTracks, updateTrackR2 } = require('../utils/db')
+const { getTrack, saveTrack, searchTracks, updateTrackR2,
+        incrementRequestCount, getTopTracks, getRandomTrack } = require('../utils/db')
 const { uploadToR2, trackKey }                             = require('../utils/r2')
 const { notify }                                           = require('./admin')
 
@@ -37,6 +38,8 @@ function replyOpts(ctx) {
 const SEARCH_CACHE_TTL = 10 * 60 * 1000   // 10 menit
 const SEARCH_CACHE_MAX = 300               // max entry, ~300 user aktif
 
+const SEARCH_PAGE_SIZE = 5
+
 const searchCache = new Map()
 
 function cacheSearch(userId, keyword, results) {
@@ -56,17 +59,6 @@ function getCachedSearch(userId, keyword) {
   const hit = searchCache.get(key)
   if (!hit) return null
   if (Date.now() - hit.ts > SEARCH_CACHE_TTL) {
-    searchCache.delete(key)
-    return null
-  }
-  return hit.results
-}
-
-function getCachedSearch(userId, keyword) {
-  const key  = `${userId}:${keyword}`
-  const hit  = searchCache.get(key)
-  if (!hit) return null
-  if (Date.now() - hit.ts > 10 * 60 * 1000) {
     searchCache.delete(key)
     return null
   }
@@ -174,6 +166,7 @@ async function handleSpotifyCallback(ctx) {
     thumbnail: track.thumbnail ? { url: track.thumbnail } : undefined,
     message_thread_id: ctx.callbackQuery.message.message_thread_id,
   })
+  incrementRequestCount(track.track_id)
 }
 
 // ── URL: download + upload ────────────────────────────────────────────────────
@@ -194,6 +187,7 @@ async function handleUrl(ctx, url) {
       const cached = getTrack(trackId)
       if (cached) {
         await ctx.replyWithAudio(cached.file_id, audioOpts)
+        incrementRequestCount(trackId)
         notify(ctx.telegram,
           `⚡ *Cache hit*\n` +
           `*${escape(cached.title)}* — ${escape(cached.artist)}\n` +
@@ -323,6 +317,53 @@ async function handleUrl(ctx, url) {
   }
 }
 
+// ── Random and Top ─────────────────────────
+async function handleRandom(ctx) {
+  const track = getRandomTrack()
+
+  if (!track) {
+    return ctx.reply(
+      `\\[ EMPTY \\]\nKoleksi masih kosong\\. Tambahkan lagu dulu via Spotify link\\!`,
+      replyOpts(ctx)
+    )
+  }
+
+  await ctx.replyWithAudio(track.file_id, {
+    title:     track.title,
+    performer: track.artist,
+    thumbnail: track.thumbnail ? { url: track.thumbnail } : undefined,
+    ...replyOpts(ctx),
+  })
+
+  incrementRequestCount(track.track_id)
+}
+
+async function handleTop(ctx) {
+  const tracks = getTopTracks()
+
+  if (!tracks.length) {
+    return ctx.reply(
+      `\\[ EMPTY \\]\nBelum ada data request\\. Mulai request lagu dulu\\!`,
+      replyOpts(ctx)
+    )
+  }
+
+  const medal = ['🥇', '🥈', '🥉']
+
+  const lines = tracks.map((t, i) => {
+    const rank  = medal[i] || `${i + 1}\\. `
+    const count = t.request_count || 0
+    return `${rank} *${escape(t.title)}* — ${escape(t.artist)}\n` +
+           `    ▶️ ${count} request${count !== 1 ? 's' : ''}`
+  }).join('\n\n')
+
+  await ctx.reply(
+    `🏆 *Top 10 Most Requested*\n\n${lines}`,
+    replyOpts(ctx)
+  )
+}
+
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 async function handleSpotify(ctx) {
   const arg = ctx.message.text.split(/\s+/).slice(1).join(' ').trim()
@@ -344,4 +385,4 @@ async function handleSpotify(ctx) {
   }
 }
 
-module.exports = { handleSpotify, handleSpotifyCallback, handleSearchPage }
+module.exports = { handleSpotify, handleSpotifyCallback, handleSearchPage, handleRandom, handleTop }

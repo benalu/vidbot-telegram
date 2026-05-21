@@ -8,6 +8,8 @@ const DB_PATH = path.join(DB_DIR, 'data.db')
 fs.mkdirSync(DB_DIR, { recursive: true })
 
 const db = new Database(DB_PATH)
+db.pragma('journal_mode = WAL')
+db.pragma('synchronous = NORMAL')
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS tracks (
@@ -26,6 +28,7 @@ db.exec(`
 
 try { db.exec(`ALTER TABLE tracks ADD COLUMN file_size INTEGER`) } catch {}
 try { db.exec(`ALTER TABLE tracks ADD COLUMN r2_url TEXT`) } catch {}
+try { db.exec(`ALTER TABLE tracks ADD COLUMN request_count INTEGER DEFAULT 0`) } catch {}
 
 db.exec(`CREATE INDEX IF NOT EXISTS idx_title  ON tracks (title)`)
 db.exec(`CREATE INDEX IF NOT EXISTS idx_artist ON tracks (artist)`)
@@ -68,6 +71,19 @@ const stmts = {
     GROUP BY artist
     ORDER BY total DESC
     LIMIT 5
+  `),
+  incrementRequest: db.prepare(`
+    UPDATE tracks SET request_count = request_count + 1 WHERE track_id = ?
+  `),
+  topTracks: db.prepare(`
+    SELECT * FROM tracks
+    ORDER BY request_count DESC
+    LIMIT 10
+  `),
+  random: db.prepare(`
+    SELECT * FROM tracks
+    ORDER BY RANDOM()
+    LIMIT 1
   `),
   updateR2: db.prepare(`UPDATE tracks SET r2_url = ? WHERE track_id = ?`),
   withoutR2: db.prepare(`
@@ -130,4 +146,21 @@ function listTracksWithoutR2() {
   return stmts.withoutR2.all()
 }
 
-module.exports = { getTrack, saveTrack, deleteTrack, searchTracks, listTracks, countTracks, getStats, updateTrackR2, listTracksWithoutR2 }
+function incrementRequestCount(trackId) {
+  stmts.incrementRequest.run(trackId)
+}
+
+function getTopTracks() {
+  return stmts.topTracks.all()
+}
+
+function getRandomTrack() {
+  return stmts.random.get() || null
+}
+
+module.exports = {
+  getTrack, saveTrack, deleteTrack, searchTracks,
+  listTracks, countTracks, getStats, updateTrackR2,
+  listTracksWithoutR2,
+  incrementRequestCount, getTopTracks, getRandomTrack,
+}

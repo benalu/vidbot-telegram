@@ -58,13 +58,16 @@ Search for leaked data from breach databases by email, username, or phone number
 — Results are capped at 50 rows per request
 `.trim(),
 
-  spotify: () => `
+spotify: () => `
 *Spotify Downloader*
 
 Download tracks from Spotify in high quality\\.
 
-*Command*
-\`/spot <url>\`
+*Commands*
+\`/spot <url>\`      — download via Spotify link
+\`/spot <title>\`    — search from collection
+\`/random\`          — surprise me\\! random track
+\`/top\`             — top 10 most requested
 
 *Example*
 \`/spot open\\.spotify\\.com/track/4cOdK2wGLETKBW3PvgPWqT\`
