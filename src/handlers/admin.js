@@ -359,7 +359,7 @@ async function handleSyncR2(ctx) {
     let success  = 0
     let failed   = 0
     const total  = tracks.length
-    const BATCH  = 5  // update progress setiap N track
+    const BATCH  = 5  
 
     try {
       for (let i = 0; i < tracks.length; i++) {
@@ -403,7 +403,11 @@ async function handleSyncR2(ctx) {
     } finally {
       isSyncing = false
     }
-  })()
+  })().catch(err => {
+  isSyncing = false  
+  logger.error({ event: 'syncr2_fatal', msg: err.message })
+  ctx.reply('❌ Sync gagal fatal\\.', { parse_mode: 'MarkdownV2' }).catch(() => {})
+})
 }
 
 

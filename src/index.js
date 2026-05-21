@@ -24,26 +24,7 @@ if (missingEnv.length) {
   process.exit(1)
 }
 
-// ---------------------------------------------------------------------------
-// Rate limiter — in-memory, per user per command, 5s cooldown
-// ---------------------------------------------------------------------------
-const cooldowns = new Map()
-
-function isRateLimited(userId, command, ms = 5000) {
-  const key = `${userId}:${command}`
-  const last = cooldowns.get(key) || 0
-  if (Date.now() - last < ms) return true
-  cooldowns.set(key, Date.now())
-  return false
-}
-
-// Cleanup expired cooldowns every 10 minutes
-setInterval(() => {
-  const cutoff = Date.now() - 60_000
-  for (const [key, ts] of cooldowns) {
-    if (ts < cutoff) cooldowns.delete(key)
-  }
-}, 10 * 60 * 1000)
+const { isRateLimited } = require('./utils/ratelimit')
 
 // ---------------------------------------------------------------------------
 // Structured logger

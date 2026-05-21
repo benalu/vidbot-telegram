@@ -34,16 +34,32 @@ function replyOpts(ctx) {
 }
 
 // ── Search: tampilkan daftar tombol dulu ──────────────────────────────────────
-const SEARCH_PAGE_SIZE = 5
+const SEARCH_CACHE_TTL = 10 * 60 * 1000   // 10 menit
+const SEARCH_CACHE_MAX = 300               // max entry, ~300 user aktif
 
 const searchCache = new Map()
 
 function cacheSearch(userId, keyword, results) {
   const key = `${userId}:${keyword}`
-  searchCache.set(key, { results, ts: Date.now() })
 
-  // Cleanup otomatis setelah 10 menit
-  setTimeout(() => searchCache.delete(key), 10 * 60 * 1000)
+  // Prune FIFO kalau sudah penuh
+  if (searchCache.size >= SEARCH_CACHE_MAX && !searchCache.has(key)) {
+    const oldestKey = searchCache.keys().next().value
+    searchCache.delete(oldestKey)
+  }
+
+  searchCache.set(key, { results, ts: Date.now() })
+}
+
+function getCachedSearch(userId, keyword) {
+  const key = `${userId}:${keyword}`
+  const hit = searchCache.get(key)
+  if (!hit) return null
+  if (Date.now() - hit.ts > SEARCH_CACHE_TTL) {
+    searchCache.delete(key)
+    return null
+  }
+  return hit.results
 }
 
 function getCachedSearch(userId, keyword) {
@@ -147,11 +163,10 @@ async function handleSpotifyCallback(ctx) {
   const trackId = ctx.callbackQuery.data.replace('spot:', '')
   const track   = getTrack(trackId)
 
-  await ctx.answerCbQuery()
-
   if (!track) {
     return ctx.answerCbQuery('❌ Track not found in cache.', { show_alert: true })
   }
+  await ctx.answerCbQuery()
 
   await ctx.replyWithAudio(track.file_id, {
     title:     track.title,

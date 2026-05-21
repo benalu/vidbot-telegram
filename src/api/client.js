@@ -2,50 +2,52 @@ const axios = require('axios')
 
 class VidBotClient {
   constructor() {
-    this.baseURL = process.env.API_URL
-    this.apiKey = process.env.API_KEY
-    this.accessToken = null
-    this.tokenPromise = null
-    this.tokenError = null
+    this.baseURL        = process.env.API_URL
+    this.apiKey         = process.env.API_KEY
+    this.accessToken    = null
+    this._refreshPromise = null   // <-- pindah ke sini, bukan di getHeaders
+    this.tokenError     = null
     this.tokenErrorUntil = 0
   }
 
   async getAccessToken() {
-    // Fail fast selama cooldown 30 detik setelah auth error
     if (this.tokenError && Date.now() < this.tokenErrorUntil) {
       throw this.tokenError
     }
 
-    try {
-      const res = await axios.get(`${this.baseURL}/auth/verify`, {
-        headers: { 'X-API-Key': this.apiKey }
-      })
-      this.accessToken = res.data.access_token
-      this.tokenError = null
-      this.tokenErrorUntil = 0
-      // Token berlaku 5 menit, refresh sebelum expire
-      setTimeout(() => { this.accessToken = null }, 4 * 60 * 1000)
-      return this.accessToken
-    } catch (err) {
-      this.tokenError = err
-      this.tokenErrorUntil = Date.now() + 30_000
-      throw err
-    }
+    // Dedupe: kalau sudah ada refresh in-flight, tunggu yang itu
+    if (this._refreshPromise) return this._refreshPromise
+
+    this._refreshPromise = (async () => {
+      try {
+        const res = await axios.get(`${this.baseURL}/auth/verify`, {
+          headers: { 'X-API-Key': this.apiKey }
+        })
+        this.accessToken     = res.data.access_token
+        this.tokenError      = null
+        this.tokenErrorUntil = 0
+        setTimeout(() => { this.accessToken = null }, 4 * 60 * 1000)
+        return this.accessToken
+      } catch (err) {
+        this.tokenError      = err
+        this.tokenErrorUntil = Date.now() + 30_000
+        throw err
+      } finally {
+        this._refreshPromise = null
+      }
+    })()
+
+    return this._refreshPromise
   }
 
   async getHeaders() {
     if (!this.accessToken) {
-      if (!this.tokenPromise) {
-        this.tokenPromise = this.getAccessToken().finally(() => {
-          this.tokenPromise = null
-        })
-      }
-      await this.tokenPromise
+      await this.getAccessToken()  
     }
     return {
-      'X-API-Key': this.apiKey,
+      'X-API-Key':      this.apiKey,
       'X-Access-Token': this.accessToken,
-      'Content-Type': 'application/json'
+      'Content-Type':   'application/json'
     }
   }
 
