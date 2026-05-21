@@ -135,16 +135,16 @@ async function handleUrl(ctx, url) {
         const size   = buffer.length
 
         // Upload ke Telegram + R2 paralel
-        const key = trackKey(trackId || Date.now().toString(), safeTitle, safeArtist)
-        const [sent, r2Url] = await Promise.all([
-          ctx.replyWithAudio(
-            { source: buffer, filename: `${safeTitle}.mp3` },
-            audioOpts
-          ),
-          uploadToR2(buffer, key, 'audio/mpeg', size),
-        ])
+        const key  = trackKey(trackId || Date.now().toString(), safeTitle, safeArtist)
 
+        // 1. Telegram dulu — ini yang user tunggu
+        const sent   = await ctx.replyWithAudio(
+          { source: buffer, filename: `${safeTitle}.mp3` },
+          audioOpts
+        )
         const fileId = sent?.audio?.file_id
+
+        // 2. Simpan DB segera dengan r2_url null dulu
         if (trackId && fileId) {
           saveTrack({
             track_id:  trackId,
@@ -155,7 +155,7 @@ async function handleUrl(ctx, url) {
             quality:   info.quality   || null,
             thumbnail: info.thumbnail || null,
             file_size: size,
-            r2_url:    r2Url,
+            r2_url:    null,           // diisi setelah R2 selesai
           })
           notify(ctx.telegram,
             `🎵 *New track cached*\n` +
@@ -163,6 +163,18 @@ async function handleUrl(ctx, url) {
             `👤 @${escape(ctx.from?.username || String(ctx.from?.id))}`
           ).catch(() => {})
         }
+
+        // 3. R2 di background — tidak diawait, tidak blokir response
+        uploadToR2(buffer, key, 'audio/mpeg', size)
+          .then(r2Url => {
+            if (trackId && r2Url) {
+              // Update kolom r2_url setelah upload selesai
+              updateTrackR2(trackId, r2Url)
+              console.log(`[r2] uploaded: ${r2Url}`)
+            }
+          })
+          .catch(err => console.warn(`[r2] background upload failed: ${err.message}`))
+
         return fileId
       } catch (err) {
         lastErr = err

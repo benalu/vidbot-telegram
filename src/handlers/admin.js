@@ -1,7 +1,8 @@
 const api = require('../api/client')
 const { escape, normalizeUrl }                           = require('../formats/utils')
 const { getTrack, saveTrack, deleteTrack,
-        listTracks, countTracks, getStats }              = require('../utils/db')
+        listTracks, countTracks, getStats,
+        updateTrackR2 }                                  = require('../utils/db')
 const { uploadToR2, deleteFromR2, trackKey } = require('../utils/r2')
 
 const ADMIN_GROUP  = process.env.TELEGRAM_ADMIN_GROUP_ID
@@ -146,7 +147,6 @@ async function handleAddTrack(ctx) {
     )
   }
 
-  // Cek apakah sudah ada di DB
   const data                     = await api.contentSpotify(url)
   const { data: info, download } = data
   const trackId                  = info.track_id || null
@@ -158,62 +158,98 @@ async function handleAddTrack(ctx) {
     )
   }
 
-  const waitMsg = await ctx.reply('⏳ Downloading and uploading to Telegram\\.\\.\\.', { parse_mode: 'MarkdownV2' })
+  const axios      = require('axios')
+  const safeTitle  = info.title  || 'Track'
+  const safeArtist = info.author || 'Unknown'
+  const candidates = [download.server_2, download.original, download.server_1].filter(Boolean)
 
-  // Reuse flow yang sama dengan handleSpotify — stream langsung ke Telegram
-  const axios        = require('axios')
-  const safeTitle    = info.title  || 'Track'
-  const safeArtist   = info.author || 'Unknown'
-  const candidates   = [download.server_2, download.original, download.server_1].filter(Boolean)
-
-  let lastErr
-  let sent
-  let r2Url    = null
+  // 1. Download buffer dulu — ini yang cepat, aman di-await
+  let buffer   = null
   let fileSize = null
+  let lastErr  = null
+
   for (const candidate of candidates) {
     try {
-      const res    = await axios.get(candidate, { responseType: 'arraybuffer', timeout: 60_000, maxRedirects: 5 })
-      const buffer = Buffer.from(res.data)
-      fileSize     = buffer.length
-
-      const key            = trackKey(trackId || Date.now().toString(), safeTitle, safeArtist)
-      const audioOpts      = {
-        title:     safeTitle,
-        performer: safeArtist,
-        thumbnail: info.thumbnail ? { url: info.thumbnail } : undefined,
-      }
-      ;[sent, r2Url] = await Promise.all([
-        ctx.replyWithAudio({ source: buffer, filename: `${safeTitle}.mp3` }, audioOpts),
-        uploadToR2(buffer, key, 'audio/mpeg', fileSize),
-      ])
+      const res = await axios.get(candidate, {
+        responseType: 'arraybuffer',
+        timeout: 60_000,
+        maxRedirects: 5,
+      })
+      buffer   = Buffer.from(res.data)
+      fileSize = buffer.length
       break
     } catch (err) {
       lastErr = err
+      console.warn(`[addtrack] download failed: ${candidate} — ${err.message}`)
     }
   }
 
-  if (!sent) {
-    return ctx.reply(`❌ Gagal download: _${escape(lastErr?.message)}_`, { parse_mode: 'MarkdownV2' })
-  }
-
-  const fileId = sent?.audio?.file_id
-  if (trackId && fileId) {
-    saveTrack({
-      track_id:  trackId,
-      file_id:   fileId,
-      title:     safeTitle,
-      artist:    safeArtist,
-      duration:  info.duration  || null,
-      quality:   info.quality   || null,
-      thumbnail: info.thumbnail || null,
-      file_size: fileSize,
-      r2_url:    r2Url,
-    })
-    await ctx.reply(
-      `✅ Berhasil ditambahkan:\n*${escape(safeTitle)}* — ${escape(safeArtist)}`,
+  if (!buffer) {
+    return ctx.reply(
+      `❌ Gagal download: _${escape(lastErr?.message)}_`,
       { parse_mode: 'MarkdownV2' }
     )
   }
+
+  // 2. Konfirmasi ke admin langsung — handler selesai di sini, tidak ada timeout
+  await ctx.reply(
+    `⏳ Download selesai \\(${(fileSize / 1024).toFixed(0)} KB\\)\\. Uploading ke Telegram di background\\.\\.\\.`,
+    { parse_mode: 'MarkdownV2' }
+  )
+
+  // 3. Upload Telegram + R2 + simpan DB — semua background, tidak blokir handler
+  const key      = trackKey(trackId || Date.now().toString(), safeTitle, safeArtist)
+  const audioOpts = {
+    title:     safeTitle,
+    performer: safeArtist,
+    thumbnail: info.thumbnail ? { url: info.thumbnail } : undefined,
+  }
+
+  ;(async () => {
+    try {
+      // Upload ke Telegram — bisa lama, tapi tidak ada yang menunggu
+      const sent   = await ctx.replyWithAudio(
+        { source: buffer, filename: `${safeTitle}.mp3` },
+        audioOpts
+      )
+      const fileId = sent?.audio?.file_id
+
+      // Simpan DB segera setelah dapat file_id
+      if (trackId && fileId) {
+        saveTrack({
+          track_id:  trackId,
+          file_id:   fileId,
+          title:     safeTitle,
+          artist:    safeArtist,
+          duration:  info.duration  || null,
+          quality:   info.quality   || null,
+          thumbnail: info.thumbnail || null,
+          file_size: fileSize,
+          r2_url:    null,
+        })
+        await ctx.reply(
+          `✅ Berhasil ditambahkan:\n*${escape(safeTitle)}* — ${escape(safeArtist)}`,
+          { parse_mode: 'MarkdownV2' }
+        )
+      }
+
+      // R2 setelah Telegram selesai
+      uploadToR2(buffer, key, 'audio/mpeg', fileSize)
+        .then(r2Url => {
+          if (trackId && r2Url) updateTrackR2(trackId, r2Url)
+          console.log(`[r2] admin upload ok: ${r2Url}`)
+        })
+        .catch(err => console.warn(`[r2] admin background upload failed: ${err.message}`))
+
+    } catch (err) {
+      console.error(`[addtrack] background upload error: ${err.message}`)
+      ctx.reply(
+        `❌ Upload ke Telegram gagal: _${escape(err.message)}_`,
+        { parse_mode: 'MarkdownV2' }
+      ).catch(() => {})
+    }
+  })()
+  // Fungsi async IIFE di atas tidak di-await — handler langsung return di sini
 }
 
 // ── /help admin ───────────────────────────────────────────────────────────────

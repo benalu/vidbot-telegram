@@ -63,6 +63,7 @@ const stmts = {
     ORDER BY total DESC
     LIMIT 5
   `),
+  updateR2: db.prepare(`UPDATE tracks SET r2_url = ? WHERE track_id = ?`),
 }
 
 function getTrack(trackId) {
@@ -114,4 +115,8 @@ function getStats() {
   return { ...stats, topArtists }
 }
 
-module.exports = { getTrack, saveTrack, deleteTrack, searchTracks, listTracks, countTracks, getStats }
+function updateTrackR2(trackId, r2Url) {
+  stmts.updateR2.run(r2Url, trackId)
+}
+
+module.exports = { getTrack, saveTrack, deleteTrack, searchTracks, listTracks, countTracks, getStats, updateTrackR2 }
