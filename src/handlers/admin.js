@@ -9,6 +9,8 @@ const ADMIN_GROUP  = process.env.TELEGRAM_ADMIN_GROUP_ID
 const OWNER_ID     = String(process.env.TELEGRAM_OWNER_ID)
 const PAGE_SIZE    = 10
 
+let isSyncing = false
+
 // Tunggu input berikutnya dari owner — simpan state per chat
 const awaitingInput = new Map()
 
@@ -34,10 +36,17 @@ async function notify(bot, text) {
 async function handleDbStats(ctx) {
   if (!isAdmin(ctx)) return
 
-  const s          = getStats()
-  const lastAdded  = s.last_added
+  const s         = getStats()
+  const lastAdded = s.last_added
     ? new Date(s.last_added * 1000).toLocaleString('id-ID')
     : 'N/A'
+
+  const r2Count   = s.total_tracks - (s.without_r2 || 0)
+  const r2Pct     = s.total_tracks > 0
+    ? Math.round((r2Count / s.total_tracks) * 100)
+    : 0
+  const barFilled = Math.round(r2Pct / 10)
+  const bar       = '■'.repeat(barFilled) + '□'.repeat(10 - barFilled)
 
   const topList = s.topArtists
     .map((a, i) => `${i + 1}\\. ${escape(a.artist)} \\(${a.total}\\)`)
@@ -48,6 +57,9 @@ async function handleDbStats(ctx) {
     `🎵 Total tracks: *${s.total_tracks}*\n` +
     `🎤 Total artists: *${s.total_artists}*\n` +
     `🕐 Last added: *${escape(lastAdded)}*\n\n` +
+    `*R2 Coverage*\n` +
+    `\`${bar}\` ${r2Pct}%\n` +
+    `☁️ ${r2Count} / ${s.total_tracks} tracks\n\n` +
     `*Top Artists:*\n${topList}`,
     { parse_mode: 'MarkdownV2' }
   )
@@ -69,10 +81,10 @@ async function handleListTrack(ctx) {
   }
 
   const lines = tracks.map((t, i) =>
-    `${offset + i + 1}\\. *${escape(t.title)}* — ${escape(t.artist)}\n` +
-    `    ${escape(t.duration || 'N/A')}  ·  ${escape(formatSize(t.file_size))}\n` +
-    `    \`${t.track_id}\``
-  ).join('\n\n')
+  `${offset + i + 1}\\. *${escape(t.title)}* — ${escape(t.artist)}\n` +
+  `    ${escape(t.duration || 'N/A')}  ·  ${escape(formatSize(t.file_size))}  ·  ${t.r2_url ? '☁️ R2' : '❌ No R2'}\n` +
+  `    \`${t.track_id}\``
+).join('\n\n')
 
   await ctx.reply(
     `🎵 *Track List* \\(page ${page}/${pages}\\)\n\n${lines}\n\n` +
@@ -252,6 +264,113 @@ async function handleAddTrack(ctx) {
   // Fungsi async IIFE di atas tidak di-await — handler langsung return di sini
 }
 
+// ── /syncr2 ───────────────────────────────────────────────────────────────────
+async function handleSyncR2(ctx) {
+  if (!isAdmin(ctx)) return
+
+  if (isSyncing) {
+    return ctx.reply('⏳ Sync sedang berjalan\\. Tunggu sampai selesai\\.', { parse_mode: 'MarkdownV2' })
+  }
+
+  const { listTracksWithoutR2 } = require('../utils/db')
+  const axios = require('axios')
+
+  const tracks = listTracksWithoutR2()
+
+  if (!tracks.length) {
+    return ctx.reply('✅ Semua track sudah ada di R2\\.', { parse_mode: 'MarkdownV2' })
+  }
+
+  // Kirim pesan awal — akan di-edit sebagai progress bar
+  const progressMsg = await ctx.reply(
+    `☁️ *Sync R2*\n\n` +
+    `${tracks.length} track belum di R2\\. Memulai sync\\.\\.\\.`,
+    { parse_mode: 'MarkdownV2' }
+  )
+
+  // Fungsi render teks progress bar
+  function renderProgress(current, total, success, failed, currentTrack) {
+    const pct       = total > 0 ? Math.round((current / total) * 100) : 0
+    const filled    = Math.round(pct / 10)
+    const bar       = '■'.repeat(filled) + '□'.repeat(10 - filled)
+    const trackLine = currentTrack
+      ? `\n📀 _${escape(currentTrack.title)} — ${escape(currentTrack.artist)}_`
+      : ''
+
+    return (
+      `☁️ *Sync R2*\n\n` +
+      `\`${bar}\` ${pct}%\n` +
+      `${current} / ${total} diproses${trackLine}\n\n` +
+      `✅ Berhasil: *${success}*\n` +
+      `❌ Gagal: *${failed}*`
+    )
+  }
+
+  // Edit progress message — swallow error kalau pesan sudah terlalu lama
+  async function updateProgress(current, total, success, failed, currentTrack) {
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      progressMsg.message_id,
+      undefined,
+      renderProgress(current, total, success, failed, currentTrack),
+      { parse_mode: 'MarkdownV2' }
+    ).catch(() => {})
+  }
+
+  // Background IIFE — tidak blokir handler, tidak ada timeout risk
+  ;(async () => {
+    isSyncing    = true
+    let success  = 0
+    let failed   = 0
+    const total  = tracks.length
+    const BATCH  = 5  // update progress setiap N track
+
+    try {
+      for (let i = 0; i < tracks.length; i++) {
+        const track = tracks[i]
+
+        // Update progress di awal tiap track
+        if (i % BATCH === 0) {
+          await updateProgress(i, total, success, failed, track)
+        }
+
+        try {
+          const fileLink = await ctx.telegram.getFileLink(track.file_id)
+          const url      = fileLink.href
+
+          const res    = await axios.get(url, { responseType: 'arraybuffer', timeout: 60_000 })
+          const buffer = Buffer.from(res.data)
+          const size   = buffer.length
+
+          const key   = trackKey(track.track_id, track.title || 'Track', track.artist || 'Unknown')
+          const r2Url = await uploadToR2(buffer, key, 'audio/mpeg', size)
+
+          updateTrackR2(track.track_id, r2Url)
+          success++
+          console.log(`[syncr2] ok (${i + 1}/${total}): ${track.title} — ${track.artist}`)
+        } catch (err) {
+          failed++
+          console.warn(`[syncr2] failed: ${track.track_id} — ${err.message}`)
+        }
+      }
+
+      // Update final
+      await updateProgress(total, total, success, failed, null)
+
+      await ctx.reply(
+        `☁️ *Sync R2 Selesai*\n\n` +
+        `✅ Berhasil: *${success}*\n` +
+        `❌ Gagal: *${failed}*\n` +
+        `${failed > 0 ? '_Jalankan /syncr2 lagi untuk retry yang gagal\\._' : '_Semua track sudah tersimpan di R2\\._'}`,
+        { parse_mode: 'MarkdownV2' }
+      )
+    } finally {
+      isSyncing = false
+    }
+  })()
+}
+
+
 // ── /help admin ───────────────────────────────────────────────────────────────
 async function handleAdminHelp(ctx) {
   if (!isAdmin(ctx)) return
@@ -264,7 +383,9 @@ async function handleAdminHelp(ctx) {
     `\`/findtrack <keyword>\`  — cari lagu di DB\n` +
     `\`/deltrack <track\\_id>\`  — hapus lagu dari DB\n\n` +
     `*Tambah Koleksi*\n` +
-    `\`/addtrack <spotify\\_url>\`  — tambah via URL Spotify\n`,
+    `\`/addtrack <spotify\\_url>\`  — tambah via URL Spotify\n\n` +
+    `*R2 Storage*\n` +
+    `\`/syncr2\`  — upload semua track yang belum ada di R2\n`,
     { parse_mode: 'MarkdownV2' }
   )
 }
@@ -277,6 +398,7 @@ function registerAdminHandlers(bot) {
   bot.command('findtrack',  handleFindTrack)
   bot.command('deltrack',   handleDelTrack)
   bot.command('addtrack',   handleAddTrack)
+  bot.command('syncr2',     handleSyncR2)
 }
 
 module.exports = { registerAdminHandlers, notify }

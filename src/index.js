@@ -161,31 +161,19 @@ for (const [name, config] of Object.entries(COMMANDS)) {
 }
 
 bot.catch((err, ctx) => {
+  const isTimeout  = err.message?.toLowerCase().includes('timeout')
   const apiCode    = err?.response?.data?.code
   const apiMessage = err?.response?.data?.message
   const SAFE_CODES = ['NOT_FOUND', 'BAD_REQUEST', 'RATE_LIMIT']
-  const isTimeout  = err.message?.toLowerCase().includes('timeout')
-
-  const userMessage = isTimeout
-    ? 'Request timed out. The server is taking too long — try again in a moment.'
-    : apiCode && SAFE_CODES.includes(apiCode)
-      ? apiMessage
-      : 'Something went wrong. Please try again later.'
 
   log('error', { msg: err.message, update: ctx?.update?.update_id })
 
-  ctx.reply(`❌ ${userMessage}`, {
-    message_thread_id: ctx.message?.message_thread_id
-  }).catch(() => {})
-})
+  // Timeout dari background IIFE — proses masih jalan, jangan ganggu user
+  if (isTimeout) return
 
-bot.catch((err, ctx) => {
-  const isTimeout = err.message?.toLowerCase().includes('timeout')
-  const userMessage = isTimeout
-    ? 'Request timed out\\. Please try again in a moment\\.'
+  const userMessage = apiCode && SAFE_CODES.includes(apiCode)
+    ? apiMessage
     : 'Something went wrong\\. Please try again later\\.'
-
-  log('error', { msg: err.message, update: ctx?.update?.update_id })
 
   ctx.reply(`❌ ${userMessage}`, {
     parse_mode: 'MarkdownV2',

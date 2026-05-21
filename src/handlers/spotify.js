@@ -1,7 +1,7 @@
 const axios = require('axios')
 const api   = require('../api/client')
 const { escape, normalizeUrl }              = require('../formats/utils')
-const { getTrack, saveTrack, searchTracks } = require('../utils/db')
+const { getTrack, saveTrack, searchTracks, updateTrackR2 } = require('../utils/db')
 const { uploadToR2, trackKey } = require('../utils/r2')
 const { notify } = require('./admin')
 
@@ -102,7 +102,7 @@ async function handleUrl(ctx, url) {
 
     const audioOpts = buildAudioOpts({ ...info, artist: safeArtist }, ctx)
 
-    // Cache hit
+    // Cache hit — file_id sudah ada, langsung kirim, tidak perlu download
     if (trackId) {
       const cached = getTrack(trackId)
       if (cached) {
@@ -116,35 +116,68 @@ async function handleUrl(ctx, url) {
       }
     }
 
-    // Sedang diproses user lain
+    // Sedang diproses user lain — tunggu file_id dari pendingUploads
     if (trackId && pendingUploads.has(trackId)) {
       const fileId = await pendingUploads.get(trackId)
-      await ctx.replyWithAudio(fileId, audioOpts)
+      if (fileId) await ctx.replyWithAudio(fileId, audioOpts)
       return
     }
 
     const candidates = [download.server_2, download.original, download.server_1].filter(Boolean)
 
-    const uploadPromise = (async () => {
-    let lastErr
+    // Download buffer dulu — ini yang cepat, aman di-await
+    let buffer  = null
+    let size    = null
+    let lastErr = null
+
     for (const candidate of candidates) {
       try {
-        // Download ke buffer sekali — dipakai untuk Telegram + R2 sekaligus
-        const res    = await axios.get(candidate, { responseType: 'arraybuffer', timeout: 60_000, maxRedirects: 5 })
-        const buffer = Buffer.from(res.data)
-        const size   = buffer.length
+        const res = await axios.get(candidate, {
+          responseType: 'arraybuffer',
+          timeout: 60_000,
+          maxRedirects: 5,
+        })
+        buffer = Buffer.from(res.data)
+        size   = buffer.length
+        break
+      } catch (err) {
+        lastErr = err
+        console.warn(`[spotify] download failed: ${candidate} — ${err.message}`)
+      }
+    }
 
-        // Upload ke Telegram + R2 paralel
-        const key  = trackKey(trackId || Date.now().toString(), safeTitle, safeArtist)
+    if (!buffer) {
+      await ctx.reply(
+        `\\[ ERROR \\]\nFailed to download track: _${escape(lastErr?.message)}_`,
+        replyOpts(ctx)
+      )
+      return
+    }
 
-        // 1. Telegram dulu — ini yang user tunggu
+    // Simpan promise file_id untuk user lain yang request lagu sama
+    const key = trackKey(trackId || Date.now().toString(), safeTitle, safeArtist)
+
+    // Resolve dengan file_id supaya pendingUploads bisa dipakai user lain
+    let resolveFileId
+    const fileIdPromise = new Promise(res => { resolveFileId = res })
+
+    if (trackId) {
+      pendingUploads.set(trackId, fileIdPromise)
+      fileIdPromise.finally(() => pendingUploads.delete(trackId))
+    }
+
+    // Handler selesai setelah delete waitMsg — tidak ada lagi yang di-await
+    // replyWithAudio jalan di background IIFE
+    ;(async () => {
+      try {
         const sent   = await ctx.replyWithAudio(
           { source: buffer, filename: `${safeTitle}.mp3` },
           audioOpts
         )
         const fileId = sent?.audio?.file_id
 
-        // 2. Simpan DB segera dengan r2_url null dulu
+        resolveFileId(fileId)  // beri tahu pendingUploads
+
         if (trackId && fileId) {
           saveTrack({
             track_id:  trackId,
@@ -155,7 +188,7 @@ async function handleUrl(ctx, url) {
             quality:   info.quality   || null,
             thumbnail: info.thumbnail || null,
             file_size: size,
-            r2_url:    null,           // diisi setelah R2 selesai
+            r2_url:    null,
           })
           notify(ctx.telegram,
             `🎵 *New track cached*\n` +
@@ -164,32 +197,20 @@ async function handleUrl(ctx, url) {
           ).catch(() => {})
         }
 
-        // 3. R2 di background — tidak diawait, tidak blokir response
+        // R2 setelah Telegram selesai — pure background
         uploadToR2(buffer, key, 'audio/mpeg', size)
           .then(r2Url => {
-            if (trackId && r2Url) {
-              // Update kolom r2_url setelah upload selesai
-              updateTrackR2(trackId, r2Url)
-              console.log(`[r2] uploaded: ${r2Url}`)
-            }
+            if (trackId && r2Url) updateTrackR2(trackId, r2Url)
+            console.log(`[r2] uploaded: ${r2Url}`)
           })
           .catch(err => console.warn(`[r2] background upload failed: ${err.message}`))
 
-        return fileId
       } catch (err) {
-        lastErr = err
-        console.warn(`[spotify] failed: ${candidate} — ${err.message}`)
+        resolveFileId(null)
+        console.error(`[spotify] background upload error: ${err.message}`)
       }
-    }
-    throw new Error(`All sources failed: ${lastErr.message}`)
-  })()
-
-    if (trackId) {
-      pendingUploads.set(trackId, uploadPromise)
-      uploadPromise.finally(() => pendingUploads.delete(trackId))
-    }
-
-    await uploadPromise
+    })()
+    // IIFE tidak di-await — handler langsung lanjut ke finally
 
   } catch (error) {
     await ctx.reply(

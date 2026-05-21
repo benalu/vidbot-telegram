@@ -51,9 +51,11 @@ const stmts = {
   count:  db.prepare(`SELECT COUNT(*) as total FROM tracks`),
   stats:  db.prepare(`
     SELECT
-      COUNT(*)                              as total_tracks,
-      COUNT(DISTINCT artist)                as total_artists,
-      MAX(created_at)                       as last_added
+      COUNT(*)                                        as total_tracks,
+      COUNT(DISTINCT artist)                          as total_artists,
+      MAX(created_at)                                 as last_added,
+      SUM(CASE WHEN r2_url IS NULL OR r2_url = ''
+               THEN 1 ELSE 0 END)                    as without_r2
     FROM tracks
   `),
   topArtists: db.prepare(`
@@ -64,6 +66,11 @@ const stmts = {
     LIMIT 5
   `),
   updateR2: db.prepare(`UPDATE tracks SET r2_url = ? WHERE track_id = ?`),
+  withoutR2: db.prepare(`
+    SELECT * FROM tracks
+    WHERE r2_url IS NULL OR r2_url = ''
+    ORDER BY created_at ASC
+  `),
 }
 
 function getTrack(trackId) {
@@ -119,4 +126,8 @@ function updateTrackR2(trackId, r2Url) {
   stmts.updateR2.run(r2Url, trackId)
 }
 
-module.exports = { getTrack, saveTrack, deleteTrack, searchTracks, listTracks, countTracks, getStats, updateTrackR2 }
+function listTracksWithoutR2() {
+  return stmts.withoutR2.all()
+}
+
+module.exports = { getTrack, saveTrack, deleteTrack, searchTracks, listTracks, countTracks, getStats, updateTrackR2, listTracksWithoutR2 }
