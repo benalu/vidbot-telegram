@@ -41,7 +41,11 @@ const stmts = {
     SELECT * FROM tracks
     WHERE LOWER(title) LIKE ? OR LOWER(artist) LIKE ?
     ORDER BY created_at DESC
-    LIMIT 10
+  `),
+  searchByWord: db.prepare(`
+    SELECT * FROM tracks
+    WHERE LOWER(title) LIKE ? OR LOWER(artist) LIKE ?
+    ORDER BY created_at DESC
   `),
   list:   db.prepare(`
     SELECT * FROM tracks
@@ -71,12 +75,6 @@ const stmts = {
     WHERE r2_url IS NULL OR r2_url = ''
     ORDER BY created_at ASC
   `),
-  searchByWord: db.prepare(`
-    SELECT * FROM tracks
-    WHERE LOWER(title) LIKE ? OR LOWER(artist) LIKE ?
-    ORDER BY created_at DESC
-    LIMIT 10
-  `),
 }
 
 function getTrack(trackId) {
@@ -92,21 +90,22 @@ function deleteTrack(trackId) {
   return info.changes > 0
 }
 
-function searchTracks(keyword) {
+function searchTracks(keyword, limit = null) {
   const normalized = keyword.toLowerCase().replace(/\s+/g, ' ').trim()
   const q          = `%${normalized}%`
 
   const words  = normalized.split(' ').filter(w => w.length > 1)
   const byWord = words.flatMap(w => {
     const wq = `%${w}%`
-    return stmts.searchByWord.all(wq, wq)  
+    return stmts.searchByWord.all(wq, wq)
   })
 
   const exact = stmts.search.all(q, q)
   const seen  = new Set(exact.map(r => r.track_id))
   const extra = byWord.filter(r => !seen.has(r.track_id))
 
-  return [...exact, ...extra].slice(0, 10)
+  const all = [...exact, ...extra]
+  return limit ? all.slice(0, limit) : all
 }
 
 function listTracks(limit = 10, offset = 0) {

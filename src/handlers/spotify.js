@@ -36,6 +36,27 @@ function replyOpts(ctx) {
 // ── Search: tampilkan daftar tombol dulu ──────────────────────────────────────
 const SEARCH_PAGE_SIZE = 5
 
+const searchCache = new Map()
+
+function cacheSearch(userId, keyword, results) {
+  const key = `${userId}:${keyword}`
+  searchCache.set(key, { results, ts: Date.now() })
+
+  // Cleanup otomatis setelah 10 menit
+  setTimeout(() => searchCache.delete(key), 10 * 60 * 1000)
+}
+
+function getCachedSearch(userId, keyword) {
+  const key  = `${userId}:${keyword}`
+  const hit  = searchCache.get(key)
+  if (!hit) return null
+  if (Date.now() - hit.ts > 10 * 60 * 1000) {
+    searchCache.delete(key)
+    return null
+  }
+  return hit.results
+}
+
 function buildSearchMessage(results, keyword, page) {
   const total   = results.length
   const pages   = Math.ceil(total / SEARCH_PAGE_SIZE)
@@ -88,26 +109,7 @@ async function handleSearch(ctx, keyword) {
   })
 }
 
-const searchCache = new Map()
 
-function cacheSearch(userId, keyword, results) {
-  const key = `${userId}:${keyword}`
-  searchCache.set(key, { results, ts: Date.now() })
-
-  // Cleanup otomatis setelah 10 menit
-  setTimeout(() => searchCache.delete(key), 10 * 60 * 1000)
-}
-
-function getCachedSearch(userId, keyword) {
-  const key  = `${userId}:${keyword}`
-  const hit  = searchCache.get(key)
-  if (!hit) return null
-  if (Date.now() - hit.ts > 10 * 60 * 1000) {
-    searchCache.delete(key)
-    return null
-  }
-  return hit.results
-}
 
 async function handleSearchPage(ctx) {
   // Format callback_data: srch:{page}:{keyword}
