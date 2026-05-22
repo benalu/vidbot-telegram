@@ -153,25 +153,37 @@ async function handleAudioUpload(ctx) {
 
     // Spotify enrichment — jalankan kalau ada title + artist
     // dan ada field yang masih kosong (album/year)
-    if (title && artist && (!albumMeta || !yearMeta || !thumbnailUrl)) {
+    if (title && artist) {
+    try {
       const enriched = await enrichMetadata(title, artist)
-      if (!albumMeta && enriched.album) {
+
+      // Spotify prioritas utama — override ID3
+      if (enriched.album) {
         albumMeta = enriched.album
         logger.info({ event: 'spotify_enrich_album', track: title, album: albumMeta })
-       }
-      if (!yearMeta && enriched.year) {
+      }
+      if (enriched.year) {
         yearMeta = enriched.year
         logger.info({ event: 'spotify_enrich_year', track: title, year: yearMeta })
-       }
-      if (!thumbnailUrl && enriched.thumbnail) {
+      }
+      if (enriched.thumbnail) {
         thumbnailUrl = enriched.thumbnail
-        logger.info({ event: 'spotify_enrich_thumbnail', track: title, thumbnail: thumbnailUrl })
-       }
-       if (!genreMeta && enriched.genre) {
+        logger.info({ event: 'spotify_enrich_thumbnail', track: title })
+      }
+      if (enriched.genre) {
         genreMeta = enriched.genre
         logger.info({ event: 'spotify_enrich_genre', track: title, genre: genreMeta })
-       }
+      }
+
+      // Fallback ke ID3 kalau Spotify tidak return data
+      // (albumMeta, yearMeta, thumbnailUrl, genreMeta sudah diset dari ID3 sebelumnya)
+      // tidak perlu aksi tambahan — nilai ID3 sudah ada di variabel
+
+    } catch (err) {
+      logger.warn({ event: 'spotify_enrich_failed', track: title, msg: err.message })
+      // Gagal enrich — tetap pakai data ID3 yang sudah ada
     }
+  }
 
     // Validasi akhir
     if (!title || !artist) {

@@ -8,8 +8,10 @@ const { uploadToR2, trackKey } = require('../../utils/r2')
 const { notify } = require('../admin/admin.handler')
 
 const { formatSpotify } = require('./spotify.format')
+const { enrichMetadata } = require('../../utils/spotify')
 const { 
   getTrack, saveTrack, searchTracks, updateTrackR2,
+  updateTrackMeta,
   incrementRequestCount, getTopTracks, getRandomTrack 
 } = require('./spotify.repo')
 
@@ -256,66 +258,91 @@ async function handleUrl(ctx, url) {
 
     // Handler selesai setelah delete waitMsg — tidak ada lagi yang di-await
     ;(async () => {
+  // Tahap 1: kirim audio ke Telegram — kalau gagal, stop di sini
+  let fileId = null
+  try {
+    const sent = await ctx.replyWithAudio(
+      { source: buffer, filename: `${safeTitle}.mp3` },
+      audioOpts
+    )
+    fileId = sent?.audio?.file_id
+    resolveFileId(fileId)
+  } catch (err) {
+    resolveFileId(null)
+    logger.error({ event: 'spotify_upload_failed', track: safeTitle, msg: err.message })
+    notify(ctx.telegram,
+      `❌ *Upload Telegram gagal*\n` +
+      `*${escape(safeTitle)}* — ${escape(safeArtist)}\n` +
+      `👤 @${escape(ctx.from?.username || String(ctx.from?.id))}\n` +
+      `_${escape(err.message)}_`
+    ).catch(() => {})
+    return  // ← stop, tidak lanjut ke DB/R2
+  }
+
+  // Tahap 2: simpan ke DB — audio sudah terkirim, error di sini tidak ganggu user
+  if (trackId && fileId) {
     try {
-      const sent   = await ctx.replyWithAudio(
-        { source: buffer, filename: `${safeTitle}.mp3` },
-        audioOpts
-      )
-      const fileId = sent?.audio?.file_id
-
-      resolveFileId(fileId)
-
-      if (trackId && fileId) {
-        saveTrack({
-          track_id:  trackId,
-          file_id:   fileId,
-          title:     safeTitle,
-          artist:    safeArtist,
-          duration:  info.duration  || null,
-          quality:   info.quality   || null,
-          thumbnail: info.thumbnail || null,
-          file_size: size,
-          r2_url:    null,
-          type:   'mp3',
-          source: 'spotify',
-          album:  info.album  || null,
-          year:   info.year   || null,
-        })
-        notify(ctx.telegram,
-          `🎵 *New track cached*\n` +
-          `*${escape(safeTitle)}* — ${escape(safeArtist)}\n` +
-          `👤 @${escape(ctx.from?.username || String(ctx.from?.id))}`
-        ).catch(() => {})
-      }
-
-      // R2 — gagal atau berhasil, user tidak tahu sama sekali
-      uploadToR2(buffer, key, 'audio/mpeg', size)
-        .then(r2Url => {
-          if (trackId && r2Url) updateTrackR2(trackId, r2Url)
-          logger.info({ event: 'r2_upload', context: 'public', track: safeTitle })
-        })
-        .catch(err => {
-          // Hanya logger + admin — tidak ada yang ke user
-          logger.warn({ event: 'r2_upload_failed', track: safeTitle, msg: err.message })
-          notify(ctx.telegram,
-            `⚠️ *R2 upload gagal*\n` +
-            `*${escape(safeTitle)}* — ${escape(safeArtist)}\n` +
-            `_${escape(err.message)}_`
-          ).catch(() => {})
-        })
-
-    } catch (err) {
-      resolveFileId(null)
-      // Hanya logger + admin — user tidak dapat pesan error apapun
-      logger.error({ event: 'spotify_upload_failed', track: safeTitle, msg: err.message })
+      saveTrack({
+        track_id:  trackId,
+        file_id:   fileId,
+        title:     safeTitle,
+        artist:    safeArtist,
+        duration:  info.duration  || null,
+        quality:   info.quality   || null,
+        thumbnail: info.thumbnail || null,
+        file_size: size,
+        r2_url:    null,
+        type:      'mp3',
+        source:    'spotify',
+        album:     info.album  || null,
+        year:      info.year   || null,
+        genre:     null,
+        file_hash: null,
+      })
       notify(ctx.telegram,
-        `❌ *Upload Telegram gagal*\n` +
+        `🎵 *New track cached*\n` +
         `*${escape(safeTitle)}* — ${escape(safeArtist)}\n` +
-        `👤 @${escape(ctx.from?.username || String(ctx.from?.id))}\n` +
-        `_${escape(err.message)}_`
+        `👤 @${escape(ctx.from?.username || String(ctx.from?.id))}`
       ).catch(() => {})
+    } catch (err) {
+      logger.error({ event: 'spotify_save_failed', track: safeTitle, msg: err.message })
+    }
+  }
+
+  // Tahap 3: enrich metadata — pure background, tidak ada notify ke user
+  ;(async () => {
+    try {
+      
+      const enriched = await enrichMetadata(safeTitle, safeArtist)
+      if (enriched.album || enriched.year || enriched.thumbnail || enriched.genre) {
+        updateTrackMeta(trackId, {
+          album:     enriched.album     || info.album     || null,
+          year:      enriched.year      || info.year      || null,
+          thumbnail: enriched.thumbnail || info.thumbnail || null,
+          genre:     enriched.genre     || null,
+        })
+        logger.info({ event: 'spotify_enrich_ok', track: safeTitle, artist: safeArtist })
+      }
+    } catch (err) {
+      logger.warn({ event: 'spotify_enrich_background_failed', track: safeTitle, msg: err.message })
     }
   })()
+
+  // Tahap 4: R2 upload — pure background
+  uploadToR2(buffer, key, 'audio/mpeg', size)
+    .then(r2Url => {
+      if (trackId && r2Url) updateTrackR2(trackId, r2Url)
+      logger.info({ event: 'r2_upload', context: 'public', track: safeTitle })
+    })
+    .catch(err => {
+      logger.warn({ event: 'r2_upload_failed', track: safeTitle, msg: err.message })
+      notify(ctx.telegram,
+        `⚠️ *R2 upload gagal*\n` +
+        `*${escape(safeTitle)}* — ${escape(safeArtist)}\n` +
+        `_${escape(err.message)}_`
+      ).catch(() => {})
+    })
+})()
     // IIFE tidak di-await — handler langsung lanjut ke finally
 
   } catch (error) {

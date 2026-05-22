@@ -100,7 +100,11 @@ const stmts = {
   `),
   updateMeta: db.prepare(`
     UPDATE tracks
-    SET album = @album, year = @year, thumbnail = @thumbnail, genre = @genre
+    SET
+      album     = COALESCE(album,     @album),
+      year      = COALESCE(year,      @year),
+      thumbnail = COALESCE(thumbnail, @thumbnail),
+      genre     = COALESCE(genre,     @genre)
     WHERE track_id = @track_id
   `),
   getByHash: db.prepare(`SELECT * FROM tracks WHERE file_hash = ? LIMIT 1`),
