@@ -1,6 +1,4 @@
 // src/handlers/adminUpload.js
-// Handle upload audio manual oleh admin — detect audio/document di admin grup,
-// parse metadata dari ID3 tag atau caption, simpan ke DB dan R2.
 
 const axios    = require('axios')
 const mm       = require('music-metadata')
@@ -8,7 +6,8 @@ const { v4: uuidv4 } = require('uuid')
 const logger   = require('../utils/logger')
 const { escape }                     = require('../formats/utils')
 const crypto = require('crypto')
-const { saveTrack, updateTrackR2, getTrackByHash } = require('../utils/db')
+const { saveTrack, updateTrackR2, getTrackByHash }             = require('../utils/db')
+const { saveFlacTrack, updateFlacTrackR2, getFlacTrackByHash } = require('../utils/flacDb')
 const { uploadToR2, trackKey }       = require('../utils/r2')
 const { enrichMetadata }             = require('../utils/spotify')
 
@@ -46,14 +45,15 @@ async function handleAudioUpload(ctx) {
   const fileSize = audio.file_size || 0
 
 // Fingerprint unik per file — cek duplikasi sebelum proses apapun
+  const isFlac   = mime.includes('flac')
   const fileHash = crypto
-  .createHash('sha256')
-  .update(`${audio.file_id}:${fileSize}`)
-  .digest('hex')
+    .createHash('sha256')
+    .update(`${audio.file_id}:${fileSize}`)
+    .digest('hex')
 
-  const existing = getTrackByHash(fileHash)
-    if (existing) {
-    return ctx.reply(
+  const existing = isFlac ? getFlacTrackByHash(fileHash) : getTrackByHash(fileHash)
+   if (existing) {
+   return ctx.reply(
         `ℹ️ File ini sudah ada di database:\n*${escape(existing.title)}* — ${escape(existing.artist)}\n\`${existing.track_id}\``,
         { parse_mode: 'MarkdownV2' }
     )
@@ -193,24 +193,29 @@ async function handleAudioUpload(ctx) {
     const fileId   = audio.file_id
     const fileSizeFinal = fileSize || 0
 
-    // Simpan ke DB dengan file_id original
-    saveTrack({
-      track_id:  trackId,
-      file_id:   fileId,
-      title,
-      artist,
-      duration: durationMeta,
-      quality:   mime.includes('flac') ? 'FLAC' : 'MP3',
-      thumbnail: thumbnailUrl,
-      file_size: fileSizeFinal,
-      r2_url:    null,
-      type:      mime.includes('flac') ? 'flac' : 'mp3',
-      source:    'manual',
-      album:     albumMeta,
-      year:      yearMeta,
-      genre:     genreMeta,
-      file_hash: fileHash,
-    })
+    const trackData = {
+        track_id:  trackId,
+        file_id:   fileId,
+        title,
+        artist,
+        duration:  durationMeta,
+        quality:   isFlac ? 'FLAC' : 'MP3',
+        thumbnail: thumbnailUrl,
+        file_size: fileSizeFinal,
+        r2_url:    null,
+        type:      isFlac ? 'flac' : 'mp3',
+        source:    'manual',
+        album:     albumMeta,
+        year:      yearMeta,
+        genre:     genreMeta,
+        file_hash: fileHash,
+    }
+
+    if (isFlac) {
+        saveFlacTrack(trackData)
+    } else {
+        saveTrack(trackData)
+    }
 
     ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
 
@@ -239,7 +244,10 @@ async function handleAudioUpload(ctx) {
         })
         const buffer = Buffer.from(res.data)
         const r2Url  = await uploadToR2(buffer, key, mime, buffer.length)
-        if (r2Url) updateTrackR2(trackId, r2Url)
+        if (r2Url) {
+            if (isFlac) updateFlacTrackR2(trackId, r2Url)
+            else        updateTrackR2(trackId, r2Url)
+        }
         logger.info({ event: 'manual_upload_r2_ok', track: title, artist })
     } catch (err) {
         logger.warn({ event: 'manual_upload_r2_failed', track: title, msg: err.message })

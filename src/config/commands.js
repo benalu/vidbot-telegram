@@ -11,21 +11,21 @@ const { handleTiktok, handleInstagram, handleTwitter, handleThreads } = require(
 const { handleSpotify }    = require('../handlers/spotify')
 const { handleVidhub }     = require('../handlers/vidhub')
 const { handleMovies }     = require('../handlers/movies')
-const { handleFlac }       = require('../handlers/flac')
+const { handleFlacCollection } = require('../handlers/flacCollection')
 const { handleAppAndroid } = require('../handlers/app')
 const { handleLeakcheck }  = require('../handlers/leakcheck')
 
 const COMMANDS = {
-  leak:    { topic: 'leakcheck', handler: handleLeakcheck,  requiresArg: true },
-  spot:    { topic: 'spotify',   handler: handleSpotify,    requiresArg: true },
-  tik:     { topic: 'tiktok',    handler: handleTiktok,     requiresArg: true },
-  inst:    { topic: 'instagram', handler: handleInstagram,  requiresArg: true },
-  twit:    { topic: 'twitter',   handler: handleTwitter,    requiresArg: true },
-  threads: { topic: 'threads',   handler: handleThreads,    requiresArg: true },
-  vids:    { topic: 'vidhub',    handler: handleVidhub,     requiresArg: true },
-  apk:     { topic: 'apk',       handler: handleAppAndroid, requiresArg: true },
-  movie:   { topic: 'movies',    handler: handleMovies,     requiresArg: true },
-  flac:    { topic: 'flac',      handler: handleFlac,       requiresArg: true },
+  leak:    { topic: 'leakcheck', handler: handleLeakcheck,      requiresArg: true },
+  spot:    { topic: 'spotify',   handler: handleSpotify,        requiresArg: true },
+  tik:     { topic: 'tiktok',    handler: handleTiktok,         requiresArg: true },
+  inst:    { topic: 'instagram', handler: handleInstagram,      requiresArg: true },
+  twit:    { topic: 'twitter',   handler: handleTwitter,        requiresArg: true },
+  threads: { topic: 'threads',   handler: handleThreads,        requiresArg: true },
+  vids:    { topic: 'vidhub',    handler: handleVidhub,         requiresArg: true },
+  apk:     { topic: 'apk',       handler: handleAppAndroid,     requiresArg: true },
+  movie:   { topic: 'movies',    handler: handleMovies,         requiresArg: true },
+  flac:    { topic: 'flac',      handler: handleFlacCollection, requiresArg: false },
 }
 
 module.exports = COMMANDS

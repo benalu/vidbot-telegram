@@ -132,20 +132,20 @@ Add the release year if the title is too common\\.
 `.trim(),
 
   flac: () => `
-*FLAC Downloader*
+  *FLAC Collection*
 
-Search and download albums or tracks in lossless FLAC format\\.
+  Cari dan putar lagu FLAC dari koleksi Vidbot\\.
 
-*Command*
-\`/flac <artist or album title>\`
+  *Command*
+  \`/flac <judul atau artist>\`
 
-*Examples*
-\`/flac Daft Punk Discovery\`
-\`/flac Radiohead OK Computer\`
-\`/flac The Weeknd\`
+  *Contoh*
+  \`/flac Daft Punk\`
+  \`/flac Radiohead OK Computer\`
+  \`/flac The Weeknd\`
 
-The more specific your query, the more accurate the results\\.
-`.trim(),
+  Semakin spesifik keyword, semakin akurat hasilnya\\.
+  `.trim(),
 
   // Aliases — covers both before and after social topic migration
   tiktok:    (...a) => TOPIC_HELP.social(...a),

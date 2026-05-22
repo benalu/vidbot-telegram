@@ -7,12 +7,18 @@ const { getTrack, saveTrack, deleteTrack,
 const { uploadToR2, deleteFromR2, trackKey } = require('../utils/r2')
 const { handleAudioUpload } = require('./adminUpload')
 const { enrichMetadata }    = require('../utils/spotify')
+const { listFlacTracks, countFlacTracks,
+        listFlacTracksWithoutR2, listFlacTracksForMetaSync,
+        updateFlacTrackR2, updateFlacTrackMeta,
+        deleteFlacTrack, getFlacTrack }  = require('../utils/flacDb')
 
 const ADMIN_GROUP  = process.env.TELEGRAM_ADMIN_GROUP_ID
 const OWNER_ID     = String(process.env.TELEGRAM_OWNER_ID)
 const PAGE_SIZE    = 10
 
 let isSyncing = false
+
+
 
 function formatSize(bytes) {
   if (!bytes) return 'N/A'
@@ -67,33 +73,42 @@ async function handleDbStats(ctx) {
 
 // ── /listtrack [page] ─────────────────────────────────────────────────────────
 function buildTrackListMessage(page) {
-  const total  = countTracks()
+  const allMp3  = listTracks(9999, 0).map(t => ({ ...t, _db: 'mp3' }))
+  const allFlac = listFlacTracks(9999, 0).map(t => ({ ...t, _db: 'flac' }))
+
+  const all   = [...allMp3, ...allFlac]
+    .sort((a, b) => {
+      const byArtist = (a.artist || '').localeCompare(b.artist || '')
+      return byArtist !== 0 ? byArtist : (a.title || '').localeCompare(b.title || '')
+    })
+
+  const total  = all.length
   const pages  = Math.ceil(total / PAGE_SIZE)
   const offset = (page - 1) * PAGE_SIZE
-  const tracks = listTracks(PAGE_SIZE, offset)
+  const tracks = all.slice(offset, offset + PAGE_SIZE)
 
   if (!tracks.length) return { text: null, buttons: null, pages: 0 }
 
-  const lines = tracks.map((t, i) =>
-    `${offset + i + 1}\\. *${escape(t.title)}* — ${escape(t.artist)}\n` +
-    `    ${escape(t.duration || 'N/A')}  ·  ${escape(formatSize(t.file_size))}  ·  ${t.r2_url ? '☁️ R2' : '❌ No R2'}\n` +
-    `    \`${t.track_id}\``
-  ).join('\n\n')
+  const lines = tracks.map((t, i) => {
+    const badge = t._db === 'flac' ? '🎚 FLAC' : '🎵 MP3'
+    return (
+      `${offset + i + 1}\\. *${escape(t.title)}* — ${escape(t.artist)}\n` +
+      `    ${escape(t.duration || 'N/A')}  ·  ${escape(formatSize(t.file_size))}  ·  ${badge}  ·  ${t.r2_url ? '☁️' : '❌'}\n` +
+      `    \`${t.track_id}\``
+    )
+  }).join('\n\n')
 
   const text = (
     `🎵 *Track List* \\(page ${page}/${pages}\\)\n\n` +
     `${lines}\n\n` +
-    `_Total: ${total} tracks_`
+    `_Total: ${total} tracks \\(${allMp3.length} MP3 \\+ ${allFlac.length} FLAC\\)_`
   )
 
-  // Bangun tombol navigasi
   const nav = []
   if (page > 1)     nav.push({ text: '◀️ Prev', callback_data: `lt:${page - 1}` })
   if (page < pages) nav.push({ text: 'Next ▶️', callback_data: `lt:${page + 1}` })
 
-  const buttons = nav.length ? [nav] : []
-
-  return { text, buttons, pages }
+  return { text, buttons: nav.length ? [nav] : [], pages }
 }
 
 async function handleListTrack(ctx) {
@@ -173,10 +188,17 @@ async function handleDelTrack(ctx) {
   const trackId = ctx.message.text.split(/\s+/)[1]
   if (!trackId) return ctx.reply('❌ Masukkan track\\_id\\.', { parse_mode: 'MarkdownV2' })
 
-  const track = getTrack(trackId)
-  if (!track) return ctx.reply(`❌ Track \`${trackId}\` tidak ditemukan\\.`, { parse_mode: 'MarkdownV2' })
+  let track  = getTrack(trackId)
+    let isFlac = false
 
-   const deleted = deleteTrack(trackId)
+    if (!track) {
+    track  = getFlacTrack(trackId)
+    isFlac = true
+    }
+
+    if (!track) return ctx.reply(`❌ Track \`${trackId}\` tidak ditemukan\\.`, { parse_mode: 'MarkdownV2' })
+
+    const deleted = isFlac ? deleteFlacTrack(trackId) : deleteTrack(trackId)
   if (deleted) {
     // Hapus dari R2 kalau ada
     if (track.r2_url) {
@@ -334,7 +356,9 @@ async function handleSyncR2(ctx) {
   const { listTracksWithoutR2 } = require('../utils/db')
   const axios = require('axios')
 
-  const tracks = listTracksWithoutR2()
+  const mp3Tracks  = listTracksWithoutR2().map(t => ({ ...t, _db: 'mp3' }))
+  const flacTracks = listFlacTracksWithoutR2().map(t => ({ ...t, _db: 'flac' }))
+  const tracks     = [...mp3Tracks, ...flacTracks]
 
   if (!tracks.length) {
     return ctx.reply('✅ Semua track sudah ada di R2\\.', { parse_mode: 'MarkdownV2' })
@@ -404,7 +428,8 @@ async function handleSyncR2(ctx) {
           const key   = trackKey(track.track_id, track.title || 'Track', track.artist || 'Unknown')
           const r2Url = await uploadToR2(buffer, key, 'audio/mpeg', size)
 
-          updateTrackR2(track.track_id, r2Url)
+          if (track._db === 'flac') updateFlacTrackR2(track.track_id, r2Url)
+          else                       updateTrackR2(track.track_id, r2Url)
           success++
           logger.info({ event: 'syncr2_ok', n: `${i + 1}/${total}`, track: track.title, artist: track.artist })
         } catch (err) {
@@ -440,7 +465,9 @@ async function handleSyncMeta(ctx) {
   const { enrichMetadata } = require('../utils/spotify')
   const { listTracksForMetaSync, updateTrackMeta } = require('../utils/db')
 
-  const tracks = listTracksForMetaSync()
+  const mp3Tracks  = listTracksForMetaSync().map(t => ({ ...t, _db: 'mp3' }))
+  const flacTracks = listFlacTracksForMetaSync().map(t => ({ ...t, _db: 'flac' }))
+  const tracks     = [...mp3Tracks, ...flacTracks]
 
   if (!tracks.length) {
     return ctx.reply(
@@ -507,12 +534,8 @@ async function handleSyncMeta(ctx) {
           }
 
           // Hanya update field yang masih NULL
-          updateTrackMeta(track.track_id, {
-            album:     track.album     || enriched.album     || null,
-            year:      track.year      || enriched.year      || null,
-            thumbnail: track.thumbnail || enriched.thumbnail || null,
-            genre:     track.genre     || enriched.genre     || null,
-          })
+          if (track._db === 'flac') updateFlacTrackMeta(track.track_id, { album, year, thumbnail, genre })
+          else                       updateTrackMeta(track.track_id, { album, year, thumbnail, genre })
 
           success++
           logger.info({ event: 'syncmeta_ok', track: track.title, artist: track.artist })

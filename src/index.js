@@ -5,7 +5,8 @@ const COMMANDS     = require('./config/commands')
 const { handleHelp } = require('./handlers/help')
 
 const { handleSpotifyCallback, handleSearchPage,
-        handleRandom, handleTop } = require('./handlers/spotify')
+        handleRandom, handleTop }                       = require('./handlers/spotify')
+const { handleFlacCallback, handleFlacSearchPage }      = require('./handlers/flacCollection')
 const { registerAdminHandlers } = require('./handlers/admin')
 const { setupProcessHandlers } = require('./utils/process')
 
@@ -170,6 +171,8 @@ bot.catch((err, ctx) => {
 
 bot.action(/^spot:/, handleSpotifyCallback)
 bot.action(/^srch:\d+:.+$/, handleSearchPage)
+bot.action(/^flac:[^:]+$/, handleFlacCallback)
+bot.action(/^flacpage:\d+:.+$/, handleFlacSearchPage)
 registerAdminHandlers(bot)
 
 setupProcessHandlers(bot)
