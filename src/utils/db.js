@@ -29,6 +29,13 @@ db.exec(`
 try { db.exec(`ALTER TABLE tracks ADD COLUMN file_size INTEGER`) } catch {}
 try { db.exec(`ALTER TABLE tracks ADD COLUMN r2_url TEXT`) } catch {}
 try { db.exec(`ALTER TABLE tracks ADD COLUMN request_count INTEGER DEFAULT 0`) } catch {}
+try { db.exec(`ALTER TABLE tracks ADD COLUMN type   TEXT DEFAULT 'mp3'`) } catch {}
+try { db.exec(`ALTER TABLE tracks ADD COLUMN source TEXT DEFAULT 'spotify'`) } catch {}
+try { db.exec(`ALTER TABLE tracks ADD COLUMN album TEXT`) } catch {}
+try { db.exec(`ALTER TABLE tracks ADD COLUMN year  TEXT`) } catch {}
+try { db.exec(`ALTER TABLE tracks ADD COLUMN genre TEXT`) } catch {}
+
+
 
 db.exec(`CREATE INDEX IF NOT EXISTS idx_title  ON tracks (title)`)
 db.exec(`CREATE INDEX IF NOT EXISTS idx_artist ON tracks (artist)`)
@@ -36,8 +43,8 @@ db.exec(`CREATE INDEX IF NOT EXISTS idx_artist ON tracks (artist)`)
 const stmts = {
   get:    db.prepare(`SELECT * FROM tracks WHERE track_id = ?`),
   insert: db.prepare(`
-    INSERT OR REPLACE INTO tracks (track_id, file_id, title, artist, duration, quality, thumbnail, file_size, r2_url)
-    VALUES (@track_id, @file_id, @title, @artist, @duration, @quality, @thumbnail, @file_size, @r2_url)
+    INSERT OR REPLACE INTO tracks (track_id, file_id, title, artist, duration, quality, thumbnail, file_size, r2_url, type, source, album, year, genre)
+    VALUES (@track_id, @file_id, @title, @artist, @duration, @quality, @thumbnail, @file_size, @r2_url, @type, @source, @album, @year, @genre)
   `),
   delete: db.prepare(`DELETE FROM tracks WHERE track_id = ?`),
   search: db.prepare(`
@@ -90,6 +97,18 @@ const stmts = {
     SELECT * FROM tracks
     WHERE r2_url IS NULL OR r2_url = ''
     ORDER BY created_at ASC
+  `),
+  listForMetaSync: db.prepare(`
+    SELECT * FROM tracks
+    WHERE (album IS NULL OR year IS NULL OR thumbnail IS NULL OR genre IS NULL)
+    AND title IS NOT NULL
+    AND artist IS NOT NULL
+    ORDER BY created_at ASC
+  `),
+  updateMeta: db.prepare(`
+    UPDATE tracks
+    SET album = @album, year = @year, thumbnail = @thumbnail, genre = @genre
+    WHERE track_id = @track_id
   `),
 }
 
@@ -146,6 +165,14 @@ function listTracksWithoutR2() {
   return stmts.withoutR2.all()
 }
 
+function listTracksForMetaSync() {
+  return stmts.listForMetaSync.all()
+}
+
+function updateTrackMeta(trackId, { album, year, thumbnail, genre }) {
+  stmts.updateMeta.run({ track_id: trackId, album, year, thumbnail, genre })
+}
+
 function incrementRequestCount(trackId) {
   stmts.incrementRequest.run(trackId)
 }
@@ -161,6 +188,6 @@ function getRandomTrack() {
 module.exports = {
   getTrack, saveTrack, deleteTrack, searchTracks,
   listTracks, countTracks, getStats, updateTrackR2,
-  listTracksWithoutR2,
+  listTracksWithoutR2, listTracksForMetaSync, updateTrackMeta,
   incrementRequestCount, getTopTracks, getRandomTrack,
 }

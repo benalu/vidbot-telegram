@@ -160,12 +160,13 @@ async function handleSpotifyCallback(ctx) {
   }
   await ctx.answerCbQuery()
 
-  await ctx.replyWithAudio(track.file_id, {
+  const threadId = ctx.callbackQuery.message.message_thread_id
+  await sendAudioOrFallback(ctx, track, {
     title:     track.title,
     performer: track.artist,
     thumbnail: track.thumbnail ? { url: track.thumbnail } : undefined,
-    message_thread_id: ctx.callbackQuery.message.message_thread_id,
-  })
+    message_thread_id: threadId,
+  }, threadId)
   incrementRequestCount(track.track_id)
 }
 
@@ -186,7 +187,7 @@ async function handleUrl(ctx, url) {
     if (trackId) {
       const cached = getTrack(trackId)
       if (cached) {
-        await ctx.replyWithAudio(cached.file_id, audioOpts)
+        await sendAudioOrFallback(ctx, cached, audioOpts, ctx.message.message_thread_id)
         incrementRequestCount(trackId)
         notify(ctx.telegram,
           `⚡ *Cache hit*\n` +
@@ -269,6 +270,10 @@ async function handleUrl(ctx, url) {
           thumbnail: info.thumbnail || null,
           file_size: size,
           r2_url:    null,
+          type:   'mp3',
+          source: 'spotify',
+          album:  info.album  || null,
+          year:   info.year   || null,
         })
         notify(ctx.telegram,
           `🎵 *New track cached*\n` +
@@ -383,6 +388,36 @@ async function handleSpotify(ctx) {
   } else {
     await handleSearch(ctx, arg)
   }
+}
+
+async function sendAudioOrFallback(ctx, track, audioOpts, threadId) {
+  const MAX_TG_SIZE = 50 * 1024 * 1024  // 50 MB
+
+  if (track.file_size && track.file_size > MAX_TG_SIZE) {
+    // File terlalu besar untuk dikirim via Telegram bot — fallback ke R2
+    if (track.r2_url) {
+      return ctx.reply(
+        `🎵 *${escape(track.title)}* — ${escape(track.artist)}\n\n` +
+        `_File ini terlalu besar untuk diputar langsung\\._`,
+        {
+          parse_mode: 'MarkdownV2',
+          message_thread_id: threadId,
+          reply_markup: {
+            inline_keyboard: [[{ text: '⬇️ Download', url: track.r2_url }]]
+          }
+        }
+      )
+    }
+    // Tidak ada R2 URL — ini tidak seharusnya terjadi karena kita filter saat upload,
+    // tapi handle gracefully
+    return ctx.reply(
+      `❌ File tidak tersedia untuk diputar\\. Hubungi admin\\.`,
+      { parse_mode: 'MarkdownV2', message_thread_id: threadId }
+    )
+  }
+
+  // Normal — kirim sebagai audio
+  return ctx.replyWithAudio(track.file_id, audioOpts)
 }
 
 module.exports = { handleSpotify, handleSpotifyCallback, handleSearchPage, handleRandom, handleTop }

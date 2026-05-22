@@ -5,6 +5,7 @@ const { getTrack, saveTrack, deleteTrack,
         listTracks, countTracks, getStats,
         updateTrackR2 }                                  = require('../utils/db')
 const { uploadToR2, deleteFromR2, trackKey } = require('../utils/r2')
+const { handleAudioUpload } = require('./adminUpload')
 
 const ADMIN_GROUP  = process.env.TELEGRAM_ADMIN_GROUP_ID
 const OWNER_ID     = String(process.env.TELEGRAM_OWNER_ID)
@@ -272,6 +273,10 @@ async function handleAddTrack(ctx, url) {
           thumbnail: info.thumbnail || null,
           file_size: fileSize,
           r2_url:    null,
+          type:   'mp3',
+          source: 'spotify',
+          album:  info.album     || null,
+          year:   info.year      || null,
         })
         await ctx.reply(
           `✅ Berhasil ditambahkan:\n*${escape(safeTitle)}* — ${escape(safeArtist)}`,
@@ -410,6 +415,114 @@ async function handleSyncR2(ctx) {
 })
 }
 
+// ── /syncmeta ─────────────────────────────────────────────────────────────────
+async function handleSyncMeta(ctx) {
+  if (!isAdmin(ctx)) return
+
+  const { enrichMetadata } = require('../utils/spotify')
+  const { listTracksForMetaSync, updateTrackMeta } = require('../utils/db')
+
+  const tracks = listTracksForMetaSync()
+
+  if (!tracks.length) {
+    return ctx.reply(
+      '✅ Semua track sudah memiliki metadata lengkap\\.',
+      { parse_mode: 'MarkdownV2' }
+    )
+  }
+
+  const progressMsg = await ctx.reply(
+    `🔍 *Sync Metadata*\n\n${tracks.length} track perlu di\\-sync\\. Memulai\\.\\.\\.`,
+    { parse_mode: 'MarkdownV2' }
+  )
+
+  function renderProgress(current, total, success, failed, skipped, currentTrack) {
+    const pct    = total > 0 ? Math.round((current / total) * 100) : 0
+    const filled = Math.round(pct / 10)
+    const bar    = '■'.repeat(filled) + '□'.repeat(10 - filled)
+    const line   = currentTrack
+      ? `\n🎵 _${escape(currentTrack.title)} — ${escape(currentTrack.artist)}_`
+      : ''
+
+    return (
+      `🔍 *Sync Metadata*\n\n` +
+      `\`${bar}\` ${pct}%\n` +
+      `${current} / ${total} diproses${line}\n\n` +
+      `✅ Updated: *${success}*\n` +
+      `⏭ Skipped: *${skipped}*\n` +
+      `❌ Gagal: *${failed}*`
+    )
+  }
+
+  async function updateProgress(current, total, success, failed, skipped, currentTrack) {
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      progressMsg.message_id,
+      undefined,
+      renderProgress(current, total, success, failed, skipped, currentTrack),
+      { parse_mode: 'MarkdownV2' }
+    ).catch(() => {})
+  }
+
+  ;(async () => {
+    let success = 0
+    let failed  = 0
+    let skipped = 0
+    const total = tracks.length
+    const BATCH = 3  // update progress setiap 3 track, jaga rate limit Spotify
+
+    try {
+      for (let i = 0; i < tracks.length; i++) {
+        const track = tracks[i]
+
+        if (i % BATCH === 0) {
+          await updateProgress(i, total, success, failed, skipped, track)
+        }
+
+        try {
+          const enriched = await enrichMetadata(track.title, track.artist)
+
+          if (!enriched.album && !enriched.year && !enriched.thumbnail && !enriched.genre) {
+            skipped++
+            logger.info({ event: 'syncmeta_no_data', track: track.title })
+            continue
+          }
+
+          // Hanya update field yang masih NULL
+          updateTrackMeta(track.track_id, {
+            album:     track.album     || enriched.album     || null,
+            year:      track.year      || enriched.year      || null,
+            thumbnail: track.thumbnail || enriched.thumbnail || null,
+            genre:     track.genre     || enriched.genre     || null,
+          })
+
+          success++
+          logger.info({ event: 'syncmeta_ok', track: track.title, artist: track.artist })
+        } catch (err) {
+          failed++
+          logger.warn({ event: 'syncmeta_failed', track_id: track.track_id, msg: err.message })
+        }
+
+        // Delay 1 detik antar request — jaga rate limit Spotify
+        await new Promise(r => setTimeout(r, 1000))
+      }
+
+      await updateProgress(total, total, success, failed, skipped, null)
+
+      await ctx.reply(
+        `🔍 *Sync Metadata Selesai*\n\n` +
+        `✅ Updated: *${success}*\n` +
+        `⏭ Skipped: *${skipped}*\n` +
+        `❌ Gagal: *${failed}*\n` +
+        `${failed > 0 ? '_Jalankan /syncmeta lagi untuk retry\\._' : '_Semua metadata sudah lengkap\\._'}`,
+        { parse_mode: 'MarkdownV2' }
+      )
+    } catch (err) {
+      logger.error({ event: 'syncmeta_fatal', msg: err.message })
+      ctx.reply('❌ Sync metadata gagal fatal\\.', { parse_mode: 'MarkdownV2' }).catch(() => {})
+    }
+  })()
+}
 
 // ── /help admin ───────────────────────────────────────────────────────────────
 async function handleAdminHelp(ctx) {
@@ -423,9 +536,12 @@ async function handleAdminHelp(ctx) {
     `\`/findtrack <keyword>\`  — cari lagu di DB\n` +
     `\`/deltrack <track\\_id>\`  — hapus lagu dari DB\n\n` +
     `*Tambah Koleksi*\n` +
-    `\`/addtrack <spotify\\_url>\`  — tambah via URL Spotify\n\n` +
+    `\`/addtrack <spotify\\_url>\`  — tambah via URL Spotify\n` +
+    `Upload audio langsung  — kirim file MP3/FLAC \\(max 50 MB\\), caption opsional: \`Title \\- Artist\`\n\n` +
     `*R2 Storage*\n` +
-    `\`/syncr2\`  — upload semua track yang belum ada di R2\n`,
+    `\`/syncr2\`  — upload semua track yang belum ada di R2\n\n` +
+    `*Metadata*\n` +
+    `\`/syncmeta\`  — sync album, year, thumbnail via Spotify\n`,
     { parse_mode: 'MarkdownV2' }
   )
 }
@@ -438,6 +554,9 @@ function registerAdminHandlers(bot) {
   bot.command('findtrack',  handleFindTrack)
   bot.command('deltrack',   handleDelTrack)
   bot.command('syncr2',     handleSyncR2)
+  bot.command('syncmeta',   handleSyncMeta)
+  bot.on('audio',    handleAudioUpload)
+  bot.on('document', handleAudioUpload)
 
   // Pagination tombol listtrack
   bot.action(/^lt:\d+$/, handleListTrackPage)
