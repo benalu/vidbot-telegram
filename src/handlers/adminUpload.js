@@ -7,9 +7,11 @@ const mm       = require('music-metadata')
 const { v4: uuidv4 } = require('uuid')
 const logger   = require('../utils/logger')
 const { escape }                     = require('../formats/utils')
-const { saveTrack, updateTrackR2 }   = require('../utils/db')
+const crypto = require('crypto')
+const { saveTrack, updateTrackR2, getTrackByHash } = require('../utils/db')
 const { uploadToR2, trackKey }       = require('../utils/r2')
 const { enrichMetadata }             = require('../utils/spotify')
+
 
 
 const ADMIN_GROUP  = process.env.TELEGRAM_ADMIN_GROUP_ID
@@ -43,6 +45,19 @@ async function handleAudioUpload(ctx) {
 
   const fileSize = audio.file_size || 0
 
+// Fingerprint unik per file — cek duplikasi sebelum proses apapun
+  const fileHash = crypto
+  .createHash('sha256')
+  .update(`${audio.file_id}:${fileSize}`)
+  .digest('hex')
+
+  const existing = getTrackByHash(fileHash)
+    if (existing) {
+    return ctx.reply(
+        `ℹ️ File ini sudah ada di database:\n*${escape(existing.title)}* — ${escape(existing.artist)}\n\`${existing.track_id}\``,
+        { parse_mode: 'MarkdownV2' }
+    )
+    }
 
   const waitMsg = await ctx.reply('⏳ Memproses audio\\.\\.\\.', { parse_mode: 'MarkdownV2' })
 
@@ -194,6 +209,7 @@ async function handleAudioUpload(ctx) {
       album:     albumMeta,
       year:      yearMeta,
       genre:     genreMeta,
+      file_hash: fileHash,
     })
 
     ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})

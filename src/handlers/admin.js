@@ -6,6 +6,7 @@ const { getTrack, saveTrack, deleteTrack,
         updateTrackR2 }                                  = require('../utils/db')
 const { uploadToR2, deleteFromR2, trackKey } = require('../utils/r2')
 const { handleAudioUpload } = require('./adminUpload')
+const { enrichMetadata }    = require('../utils/spotify')
 
 const ADMIN_GROUP  = process.env.TELEGRAM_ADMIN_GROUP_ID
 const OWNER_ID     = String(process.env.TELEGRAM_OWNER_ID)
@@ -263,20 +264,37 @@ async function handleAddTrack(ctx, url) {
       ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
 
       if (trackId && fileId) {
+        // Enrich metadata via Spotify Web API + Last.fm
+        let albumMeta     = info.album    || null
+        let yearMeta      = info.year     || null
+        let thumbnailMeta = info.thumbnail || null
+        let genreMeta     = null
+
+        try {
+            const enriched = await enrichMetadata(safeTitle, safeArtist)
+            if (!albumMeta     && enriched.album)     albumMeta     = enriched.album
+            if (!yearMeta      && enriched.year)      yearMeta      = enriched.year
+            if (!thumbnailMeta && enriched.thumbnail) thumbnailMeta = enriched.thumbnail
+            if (enriched.genre)                       genreMeta     = enriched.genre
+        } catch (err) {
+            logger.warn({ event: 'addtrack_enrich_failed', msg: err.message })
+        }
+
         saveTrack({
-          track_id:  trackId,
-          file_id:   fileId,
-          title:     safeTitle,
-          artist:    safeArtist,
-          duration:  info.duration  || null,
-          quality:   info.quality   || null,
-          thumbnail: info.thumbnail || null,
-          file_size: fileSize,
-          r2_url:    null,
-          type:   'mp3',
-          source: 'spotify',
-          album:  info.album     || null,
-          year:   info.year      || null,
+            track_id:  trackId,
+            file_id:   fileId,
+            title:     safeTitle,
+            artist:    safeArtist,
+            duration:  info.duration || null,
+            quality:   info.quality  || null,
+            thumbnail: thumbnailMeta,
+            file_size: fileSize,
+            r2_url:    null,
+            type:      'mp3',
+            source:    'spotify',
+            album:     albumMeta,
+            year:      yearMeta,
+            genre:     genreMeta,
         })
         await ctx.reply(
           `✅ Berhasil ditambahkan:\n*${escape(safeTitle)}* — ${escape(safeArtist)}`,

@@ -34,17 +34,19 @@ try { db.exec(`ALTER TABLE tracks ADD COLUMN source TEXT DEFAULT 'spotify'`) } c
 try { db.exec(`ALTER TABLE tracks ADD COLUMN album TEXT`) } catch {}
 try { db.exec(`ALTER TABLE tracks ADD COLUMN year  TEXT`) } catch {}
 try { db.exec(`ALTER TABLE tracks ADD COLUMN genre TEXT`) } catch {}
+try { db.exec(`ALTER TABLE tracks ADD COLUMN file_hash TEXT`) } catch {}
 
 
 
 db.exec(`CREATE INDEX IF NOT EXISTS idx_title  ON tracks (title)`)
 db.exec(`CREATE INDEX IF NOT EXISTS idx_artist ON tracks (artist)`)
+db.exec(`CREATE INDEX IF NOT EXISTS idx_file_hash ON tracks (file_hash)`)
 
 const stmts = {
   get:    db.prepare(`SELECT * FROM tracks WHERE track_id = ?`),
   insert: db.prepare(`
-    INSERT OR REPLACE INTO tracks (track_id, file_id, title, artist, duration, quality, thumbnail, file_size, r2_url, type, source, album, year, genre)
-    VALUES (@track_id, @file_id, @title, @artist, @duration, @quality, @thumbnail, @file_size, @r2_url, @type, @source, @album, @year, @genre)
+    INSERT OR REPLACE INTO tracks (track_id, file_id, title, artist, duration, quality, thumbnail, file_size, r2_url, type, source, album, year, genre, file_hash)
+    VALUES (@track_id, @file_id, @title, @artist, @duration, @quality, @thumbnail, @file_size, @r2_url, @type, @source, @album, @year, @genre, @file_hash)
   `),
   delete: db.prepare(`DELETE FROM tracks WHERE track_id = ?`),
   search: db.prepare(`
@@ -110,6 +112,7 @@ const stmts = {
     SET album = @album, year = @year, thumbnail = @thumbnail, genre = @genre
     WHERE track_id = @track_id
   `),
+  getByHash: db.prepare(`SELECT * FROM tracks WHERE file_hash = ? LIMIT 1`),
 }
 
 function getTrack(trackId) {
@@ -185,9 +188,14 @@ function getRandomTrack() {
   return stmts.random.get() || null
 }
 
+function getTrackByHash(hash) {
+  return stmts.getByHash.get(hash) || null
+}
+
 module.exports = {
   getTrack, saveTrack, deleteTrack, searchTracks,
   listTracks, countTracks, getStats, updateTrackR2,
   listTracksWithoutR2, listTracksForMetaSync, updateTrackMeta,
   incrementRequestCount, getTopTracks, getRandomTrack,
+  getTrackByHash,
 }
