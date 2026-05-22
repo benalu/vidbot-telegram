@@ -1,8 +1,9 @@
+//src/features/spotify/spotify.repo.js
 const Database = require('better-sqlite3')
 const path     = require('path')
 const fs       = require('fs')
 
-const DB_DIR  = path.join(__dirname, '../../data/spotify')
+const DB_DIR  = path.join(__dirname, '../../../data/spotify')
 const DB_PATH = path.join(DB_DIR, 'data.db')
 
 fs.mkdirSync(DB_DIR, { recursive: true })

@@ -1,11 +1,17 @@
+//src/features/spotify/spotify.handler.js
+
 const axios  = require('axios')
-const api    = require('../api/client')
-const logger = require('../utils/logger')
-const { escape, normalizeUrl }                             = require('../formats/utils')
-const { getTrack, saveTrack, searchTracks, updateTrackR2,
-        incrementRequestCount, getTopTracks, getRandomTrack } = require('../utils/db')
-const { uploadToR2, trackKey }                             = require('../utils/r2')
-const { notify }                                           = require('./admin')
+const api = require('../../api/client')
+const logger = require('../../utils/logger')
+const { escape, normalizeUrl } = require('../../formats/utils')
+const { uploadToR2, trackKey } = require('../../utils/r2')
+const { notify } = require('../admin/admin.handler')
+
+const { formatSpotify } = require('./spotify.format')
+const { 
+  getTrack, saveTrack, searchTracks, updateTrackR2,
+  incrementRequestCount, getTopTracks, getRandomTrack 
+} = require('./spotify.repo')
 
 const pendingUploads = new Map()
 

@@ -7,11 +7,11 @@
 //   handler     : fungsi async (ctx) => void
 //   requiresArg : true → index.js cek ada argument sebelum panggil handler
 
-const { handleTiktok, handleInstagram, handleTwitter, handleThreads } = require('../handlers/content')
-const { handleSpotify }    = require('../handlers/spotify')
+const { handleTiktok, handleInstagram, handleTwitter, handleThreads } = require('../features/social/social.handler')
+const { handleSpotify } = require('../features/spotify/spotify.handler')
 const { handleVidhub }     = require('../handlers/vidhub')
 const { handleMovies }     = require('../handlers/movies')
-const { handleFlacCollection } = require('../handlers/flacCollection')
+const { handleFlacCollection } = require('../features/flac/flac.handler')
 const { handleAppAndroid } = require('../handlers/app')
 const { handleLeakcheck }  = require('../handlers/leakcheck')
 

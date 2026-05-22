@@ -1,3 +1,5 @@
+// src/features/flac/flac.format.js
+
 const { escape } = require('./utils')
 
 function formatFlac(entry) {

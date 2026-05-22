@@ -4,10 +4,12 @@ const GROUP_TOPICS = require('./config/topics')
 const COMMANDS     = require('./config/commands')
 const { handleHelp } = require('./handlers/help')
 
-const { handleSpotifyCallback, handleSearchPage,
-        handleRandom, handleTop }                       = require('./handlers/spotify')
-const { handleFlacCallback, handleFlacSearchPage }      = require('./handlers/flacCollection')
-const { registerAdminHandlers } = require('./handlers/admin')
+const { 
+  handleSpotifyCallback, handleSearchPage,
+  handleRandom, handleTop 
+} = require('./features/spotify/spotify.handler')
+const { handleFlacCallback, handleFlacSearchPage } = require('./features/flac/flac.handler')
+const { registerAdminHandlers } = require('./features/admin/admin.handler')
 const { setupProcessHandlers } = require('./utils/process')
 
 // ---------------------------------------------------------------------------

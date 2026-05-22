@@ -1,4 +1,5 @@
-const { escape } = require('./utils')
+// src/formats/content.js
+const { escape } = require('../../formats/utils')
 
 function formatTiktok(data) {
   const { data: info, download } = data
@@ -18,25 +19,6 @@ function formatTiktok(data) {
     ``,
     `👤 *Author:* ${escape(info.author || 'Unknown')}`,
     `🔗 *Username:* ${escape(info.username || 'Unknown')}`,
-  ].join('\n')
-
-  return { text, buttons }
-}
-
-function formatSpotify(data) {
-  const { data: info, download } = data
-
-  const buttons = []
-  if (download.original) buttons.push([{ text: '📥 Original', url: download.original }])
-  if (download.server_2) buttons.push([{ text: '📥 Server 2', url: download.server_2 }])
-
-  const text = [
-    `🎵 *${escape(info.title || 'Spotify Track')}*`,
-    ``,
-    `👤 *Artist:* ${escape(info.author || 'Unknown')}`,
-    `⏱ *Duration:* ${escape(info.duration || 'N/A')}`,
-    `🎚 *Quality:* ${escape(info.quality || 'HQ')}`,
-    `📁 *Format:* \\.${escape(data.type || 'mp3')}`,
   ].join('\n')
 
   return { text, buttons }
@@ -102,4 +84,5 @@ function formatThreads(data) {
   return { text, buttons }
 }
 
-module.exports = { formatTiktok, formatSpotify, formatInstagram, formatTwitter, formatThreads }
+// formatSpotify dihapus dari export
+module.exports = { formatTiktok, formatInstagram, formatTwitter, formatThreads }

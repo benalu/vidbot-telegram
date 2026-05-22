@@ -1,6 +1,6 @@
-const api = require('../api/client')
-const { normalizeUrl } = require('../formats/utils')
-const { formatTiktok, formatSpotify, formatInstagram, formatTwitter, formatThreads } = require('../formats/content')
+const api = require('../../api/client')
+const { normalizeUrl } = require('../../formats/utils')
+const { formatTiktok, formatSpotify, formatInstagram, formatTwitter, formatThreads } = require('./social.format')
 
 function replyOpts(ctx) {
   return { message_thread_id: ctx.message.message_thread_id }

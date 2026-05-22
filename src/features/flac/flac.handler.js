@@ -1,8 +1,10 @@
-// src/handlers/flacCollection.js
-const logger  = require('../utils/logger')
-const { escape } = require('../formats/utils')
-const { searchFlacTracks, getFlacTrack,
-        incrementFlacRequestCount } = require('../utils/flacDb')
+// src/features/flac/flac.handler.js
+
+const logger = require('../../utils/logger')
+const { escape } = require('../../formats/utils')
+const { 
+  searchFlacTracks, getFlacTrack, incrementFlacRequestCount 
+} = require('./flac.repo')
 
 const SEARCH_PAGE_SIZE = 5
 const SEARCH_CACHE_TTL = 10 * 60 * 1000

@@ -1,16 +1,16 @@
-const api = require('../api/client')
-const logger = require('../utils/logger')
-const { escape, normalizeUrl }                           = require('../formats/utils')
+const api = require('../../api/client')
+const logger = require('../../utils/logger')
+const { escape, normalizeUrl }                           = require('../../formats/utils')
 const { getTrack, saveTrack, deleteTrack,
         listTracks, countTracks, getStats,
-        updateTrackR2 }                                  = require('../utils/db')
-const { uploadToR2, deleteFromR2, trackKey } = require('../utils/r2')
-const { handleAudioUpload } = require('./adminUpload')
-const { enrichMetadata }    = require('../utils/spotify')
+        updateTrackR2 }                                  = require('../spotify/spotify.repo')
+const { uploadToR2, deleteFromR2, trackKey } = require('../../utils/r2')
+const { handleAudioUpload } = require('./admin.upload')
+const { enrichMetadata }    = require('../../utils/spotify')
 const { listFlacTracks, countFlacTracks,
         listFlacTracksWithoutR2, listFlacTracksForMetaSync,
         updateFlacTrackR2, updateFlacTrackMeta,
-        deleteFlacTrack, getFlacTrack }  = require('../utils/flacDb')
+        deleteFlacTrack, getFlacTrack }  = require('../flac/flac.repo')
 
 const ADMIN_GROUP  = process.env.TELEGRAM_ADMIN_GROUP_ID
 const OWNER_ID     = String(process.env.TELEGRAM_OWNER_ID)
@@ -162,7 +162,7 @@ async function handleFindTrack(ctx) {
   const keyword = ctx.message.text.split(/\s+/).slice(1).join(' ').trim()
   if (!keyword) return ctx.reply('❌ Masukkan keyword\\.', { parse_mode: 'MarkdownV2' })
 
-  const { searchTracks } = require('../utils/db')
+  const { searchTracks } = require('../spotify/spotify.repo')
   const results = searchTracks(keyword)
 
   if (!results.length) {
@@ -353,7 +353,7 @@ async function handleSyncR2(ctx) {
     return ctx.reply('⏳ Sync sedang berjalan\\. Tunggu sampai selesai\\.', { parse_mode: 'MarkdownV2' })
   }
 
-  const { listTracksWithoutR2 } = require('../utils/db')
+  const { listTracksWithoutR2 } = require('../spotify/spotify.repo')
   const axios = require('axios')
 
   const mp3Tracks  = listTracksWithoutR2().map(t => ({ ...t, _db: 'mp3' }))
@@ -462,8 +462,8 @@ async function handleSyncR2(ctx) {
 async function handleSyncMeta(ctx) {
   if (!isAdmin(ctx)) return
 
-  const { enrichMetadata } = require('../utils/spotify')
-  const { listTracksForMetaSync, updateTrackMeta } = require('../utils/db')
+  const { enrichMetadata } = require('../../utils/spotify')
+  const { listTracksForMetaSync, updateTrackMeta } = require('../spotify/spotify.repo')
 
   const mp3Tracks  = listTracksForMetaSync().map(t => ({ ...t, _db: 'mp3' }))
   const flacTracks = listFlacTracksForMetaSync().map(t => ({ ...t, _db: 'flac' }))

@@ -3,13 +3,13 @@
 const axios    = require('axios')
 const mm       = require('music-metadata')
 const { v4: uuidv4 } = require('uuid')
-const logger   = require('../utils/logger')
-const { escape }                     = require('../formats/utils')
+const logger   = require('../../utils/logger')
+const { escape }                     = require('../../formats/utils')
 const crypto = require('crypto')
-const { saveTrack, updateTrackR2, getTrackByHash }             = require('../utils/db')
-const { saveFlacTrack, updateFlacTrackR2, getFlacTrackByHash } = require('../utils/flacDb')
-const { uploadToR2, trackKey }       = require('../utils/r2')
-const { enrichMetadata }             = require('../utils/spotify')
+const { saveTrack, updateTrackR2, getTrackByHash }             = require('../spotify/spotify.repo')
+const { saveFlacTrack, updateFlacTrackR2, getFlacTrackByHash } = require('../flac/flac.repo')
+const { uploadToR2, trackKey }       = require('../../utils/r2')
+const { enrichMetadata }             = require('../../utils/spotify')
 
 
 
