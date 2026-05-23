@@ -12,7 +12,7 @@ const { enrichMetadata } = require('../../utils/spotify')
 const { 
   getTrack, saveTrack, searchTracks, updateTrackR2,
   updateTrackMeta,
-  incrementRequestCount, getTopTracks, getRandomTrack 
+  incrementRequestCount, getTopTracks, getRandomTrack , findTrackByTitleArtist
 } = require('./spotify.repo')
 
 const pendingUploads = new Map()
@@ -204,6 +204,17 @@ async function handleUrl(ctx, url) {
         ).catch(() => {})
         return
       }
+    }
+
+    const titleArtistCached = findTrackByTitleArtist(safeTitle, safeArtist)
+    if (titleArtistCached) {
+      await sendAudioOrFallback(ctx, titleArtistCached, audioOpts, ctx.message.message_thread_id)
+      // Opsional: update track_id jika sebelumnya null (entry dari upload manual)
+      if (trackId && !titleArtistCached.track_id) {
+        // bisa tambah updateTrackId(titleArtistCached.track_id, trackId) kalau mau
+      }
+      incrementRequestCount(titleArtistCached.track_id)
+      return
     }
 
     // Sedang diproses user lain — tunggu file_id dari pendingUploads

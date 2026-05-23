@@ -107,6 +107,12 @@ const stmts = {
       genre     = COALESCE(genre,     @genre)
     WHERE track_id = @track_id
   `),
+  findByTitleArtist: db.prepare(`
+    SELECT * FROM tracks
+    WHERE LOWER(TRIM(title)) = LOWER(TRIM(?))
+      AND LOWER(TRIM(artist)) = LOWER(TRIM(?))
+    LIMIT 1
+  `),
   getByHash: db.prepare(`SELECT * FROM tracks WHERE file_hash = ? LIMIT 1`),
 }
 
@@ -122,6 +128,7 @@ function listFlacTracksWithoutR2()      { return stmts.withoutR2.all() }
 function listFlacTracksForMetaSync()    { return stmts.listForMetaSync.all() }
 function getFlacTopTracks()             { return stmts.topTracks.all() }
 function getFlacRandomTrack()           { return stmts.random.get() || null }
+function findFlacTrackByTitleArtist(title, artist) { return stmts.findByTitleArtist.get(title, artist) || null }
 
 function searchFlacTracks(keyword, limit = null) {
   const normalized = keyword.toLowerCase().replace(/\s+/g, ' ').trim()
@@ -157,4 +164,5 @@ module.exports = {
   listFlacTracksWithoutR2, listFlacTracksForMetaSync,
   updateFlacTrackMeta, getFlacStats,
   incrementFlacRequestCount, getFlacTopTracks, getFlacRandomTrack,
+  findFlacTrackByTitleArtist,
 }

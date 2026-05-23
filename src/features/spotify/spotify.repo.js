@@ -117,6 +117,12 @@ const stmts = {
         genre     = COALESCE(genre,     @genre)
     WHERE track_id = @track_id
   `),
+  findByTitleArtist: db.prepare(`
+    SELECT * FROM tracks
+    WHERE LOWER(TRIM(title)) = LOWER(TRIM(?))
+        AND LOWER(TRIM(artist)) = LOWER(TRIM(?))
+    LIMIT 1
+  `),
   getByHash: db.prepare(`SELECT * FROM tracks WHERE file_hash = ? LIMIT 1`),
 }
 
@@ -197,10 +203,14 @@ function getTrackByHash(hash) {
   return stmts.getByHash.get(hash) || null
 }
 
+function findTrackByTitleArtist(title, artist) {
+  return stmts.findByTitleArtist.get(title, artist) || null
+}
+
 module.exports = {
   getTrack, saveTrack, deleteTrack, searchTracks,
   listTracks, countTracks, getStats, updateTrackR2,
   listTracksWithoutR2, listTracksForMetaSync, updateTrackMeta,
   incrementRequestCount, getTopTracks, getRandomTrack,
-  getTrackByHash,
+  getTrackByHash, findTrackByTitleArtist,
 }
