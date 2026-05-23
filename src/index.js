@@ -2,7 +2,7 @@ require('dotenv').config()
 const { Telegraf } = require('telegraf')
 const GROUP_TOPICS = require('./config/topics')
 const COMMANDS     = require('./config/commands')
-const { handleHelp, getHelpText } = require('./handlers/help')
+const { handleHelp } = require('./handlers/help')
 
 const { 
   handleSpotifyCallback, handleSearchPage,
@@ -11,7 +11,6 @@ const {
 const { handleFlacCallback, handleFlacSearchPage } = require('./features/flac/flac.handler')
 const { registerAdminHandlers } = require('./features/admin/admin.handler')
 const { setupProcessHandlers } = require('./utils/process')
-const { registerDmHandlers } = require('./features/dm/dm.handler')
 
 // ---------------------------------------------------------------------------
 // Env validation at startup — fail fast
@@ -177,7 +176,6 @@ bot.action(/^srch:\d+:.+$/, handleSearchPage)
 bot.action(/^flac:[^:]+$/, handleFlacCallback)
 bot.action(/^flacpage:\d+:.+$/, handleFlacSearchPage)
 registerAdminHandlers(bot)
-registerDmHandlers(bot)
 setupProcessHandlers(bot)
 bot.launch()
 logger.info({ status: 'started', commands: ['help', ...Object.keys(COMMANDS)] })
