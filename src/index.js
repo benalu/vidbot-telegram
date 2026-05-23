@@ -151,6 +151,16 @@ function createHandler(commandName, { topic, handler, requiresArg }) {
 // ---------------------------------------------------------------------------
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN)
 
+bot.use((ctx, next) => {
+  const type   = ctx.chat?.type
+  const chatId = String(ctx.chat?.id)
+  const ALLOWED = [
+    process.env.TELEGRAM_GROUP_ID,
+    process.env.TELEGRAM_ADMIN_GROUP_ID,
+  ]
+  if (!ctx.chat || type === 'private' || ALLOWED.includes(chatId)) return next()
+})
+
 bot.command('start', handleDmStart)
 bot.command('help', handleHelp)
 

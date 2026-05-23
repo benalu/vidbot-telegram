@@ -1,20 +1,23 @@
 // src/features/dm/dm.handler.js
-//
-// Logic handler untuk private chat (DM) langsung ke bot.
-// Dipanggil dari createHandler() di index.js ketika ctx.chat.type === 'private'.
-// Mendukung: spot (search koleksi), flac (search koleksi), apk (API).
-// TIDAK mendaftar bot.command() sendiri — semua routing lewat index.js.
 
 const { escape, normalizeUrl } = require('../../formats/utils')
 const { searchTracks, getTrack, incrementRequestCount } = require('../spotify/spotify.repo')
 const { searchFlacTracks, getFlacTrack, incrementFlacRequestCount } = require('../flac/flac.repo')
-const api = require('../../api/client')
+const { isRateLimited } = require('../../utils/ratelimit')
+const api    = require('../../api/client')
 const { formatApp } = require('../../formats/app')
 const logger = require('../../utils/logger')
 
 const SEARCH_PAGE_SIZE = 5
 const SEARCH_CACHE_TTL = 10 * 60 * 1000
 const SEARCH_CACHE_MAX = 300
+
+// Cooldown berbeda per command — APK hit external API, lebih mahal
+const DM_COOLDOWN = {
+  spot: 5_000,
+  flac: 5_000,
+  apk:  10_000,
+}
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
 
@@ -43,9 +46,22 @@ function replyOpts(extra = {}) {
   return { parse_mode: 'MarkdownV2', ...extra }
 }
 
+// Typing indicator — aktif selama handler jalan, auto-stop di finally
+function startTyping(ctx) {
+  ctx.sendChatAction('typing').catch(() => {})
+  const interval = setInterval(() => ctx.sendChatAction('typing').catch(() => {}), 4000)
+  return () => clearInterval(interval)
+}
+
+// Guard: callback hanya boleh diproses dari private chat
+function isPrivateCallback(ctx) {
+  return ctx.callbackQuery?.message?.chat?.type === 'private'
+}
+
 // ── /start ────────────────────────────────────────────────────────────────────
 
 async function handleDmStart(ctx) {
+  if (ctx.chat?.type !== 'private') return
   const name = escape(ctx.from?.first_name || 'there')
   await ctx.reply(
     `👋 *Halo, ${name}\\!*\n\n` +
@@ -106,20 +122,26 @@ async function handleDmSpot(ctx) {
   }
 
   const safeKeyword = arg.slice(0, 40).trim()
-  const results     = searchTracks(safeKeyword)
+  const stopTyping  = startTyping(ctx)
 
-  if (!results.length) {
-    return ctx.reply(
-      `\\[ NOT FOUND \\]\nTidak ada lagu untuk: *${escape(arg)}*\n\n_Coba dengan judul atau artist yang berbeda\\._`,
-      replyOpts()
-    )
+  try {
+    const results = searchTracks(safeKeyword)
+
+    if (!results.length) {
+      return ctx.reply(
+        `\\[ NOT FOUND \\]\nTidak ada lagu untuk: *${escape(arg)}*\n\n_Coba dengan judul atau artist yang berbeda\\._`,
+        replyOpts()
+      )
+    }
+
+    const cacheKey = `dm_spot:${ctx.from?.id}:${safeKeyword}`
+    cacheSet(cacheKey, results)
+
+    const { text, buttons } = buildSpotifyMessage(results, safeKeyword, 1)
+    await ctx.reply(text, { ...replyOpts(), reply_markup: { inline_keyboard: buttons } })
+  } finally {
+    stopTyping()
   }
-
-  const cacheKey = `dm_spot:${ctx.from?.id}:${safeKeyword}`
-  cacheSet(cacheKey, results)
-
-  const { text, buttons } = buildSpotifyMessage(results, safeKeyword, 1)
-  await ctx.reply(text, { ...replyOpts(), reply_markup: { inline_keyboard: buttons } })
 }
 
 // ── /flac DM ──────────────────────────────────────────────────────────────────
@@ -158,20 +180,26 @@ async function handleDmFlac(ctx) {
   }
 
   const safeKeyword = arg.slice(0, 40).trim()
-  const results     = searchFlacTracks(safeKeyword)
+  const stopTyping  = startTyping(ctx)
 
-  if (!results.length) {
-    return ctx.reply(
-      `\\[ NOT FOUND \\]\nTidak ada FLAC untuk: *${escape(arg)}*\n\n_Coba dengan judul atau artist yang berbeda\\._`,
-      replyOpts()
-    )
+  try {
+    const results = searchFlacTracks(safeKeyword)
+
+    if (!results.length) {
+      return ctx.reply(
+        `\\[ NOT FOUND \\]\nTidak ada FLAC untuk: *${escape(arg)}*\n\n_Coba dengan judul atau artist yang berbeda\\._`,
+        replyOpts()
+      )
+    }
+
+    const cacheKey = `dm_flac:${ctx.from?.id}:${safeKeyword}`
+    cacheSet(cacheKey, results)
+
+    const { text, buttons } = buildFlacMessage(results, safeKeyword, 1)
+    await ctx.reply(text, { ...replyOpts(), reply_markup: { inline_keyboard: buttons } })
+  } finally {
+    stopTyping()
   }
-
-  const cacheKey = `dm_flac:${ctx.from?.id}:${safeKeyword}`
-  cacheSet(cacheKey, results)
-
-  const { text, buttons } = buildFlacMessage(results, safeKeyword, 1)
-  await ctx.reply(text, { ...replyOpts(), reply_markup: { inline_keyboard: buttons } })
 }
 
 // ── /apk DM ───────────────────────────────────────────────────────────────────
@@ -186,11 +214,10 @@ async function handleDmApk(ctx) {
     )
   }
 
-  const waitMsg = await ctx.reply('_Mencari APK\\.\\.\\._', replyOpts())
+  const stopTyping = startTyping(ctx)
 
   try {
     const data = await api.appAndroid(keyword)
-    ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
 
     if (!data.total || data.total === 0) {
       return ctx.reply(
@@ -214,21 +241,27 @@ async function handleDmApk(ctx) {
     logger.info({ event: 'dm_apk_sent', keyword, userId: ctx.from?.id })
 
   } catch (err) {
-    ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
     logger.error({ event: 'dm_apk_error', msg: err.message })
 
     const apiCode    = err?.response?.data?.code
     const apiMessage = err?.response?.data?.message
     const SAFE_CODES = ['NOT_FOUND', 'BAD_REQUEST', 'RATE_LIMIT']
-    const userMsg    = apiCode && SAFE_CODES.includes(apiCode) ? escape(apiMessage) : 'Terjadi kesalahan\\. Coba lagi nanti\\.'
+    const userMsg    = apiCode && SAFE_CODES.includes(apiCode)
+      ? escape(apiMessage)
+      : 'Terjadi kesalahan\\. Coba lagi nanti\\.'
 
     await ctx.reply(`❌ ${userMsg}`, replyOpts())
+  } finally {
+    stopTyping()
   }
 }
 
-// ── Callback handlers (dipanggil dari index.js bot.action) ───────────────────
+// ── Callback handlers ─────────────────────────────────────────────────────────
 
 async function handleDmSpotCallback(ctx) {
+  // Guard: hanya dari private chat
+  if (!isPrivateCallback(ctx)) return ctx.answerCbQuery()
+
   const trackId = ctx.callbackQuery.data.replace('dm_spot:', '')
   const track   = getTrack(trackId)
 
@@ -245,11 +278,13 @@ async function handleDmSpotCallback(ctx) {
 }
 
 async function handleDmSpotPage(ctx) {
+  if (!isPrivateCallback(ctx)) return ctx.answerCbQuery()
+
   const match = ctx.callbackQuery.data.match(/^dm_srch:(\d+):(.+)$/)
   if (!match) return ctx.answerCbQuery()
 
-  const page    = parseInt(match[1])
-  const keyword = match[2]
+  const page     = parseInt(match[1])
+  const keyword  = match[2]
   const cacheKey = `dm_spot:${ctx.from?.id}:${keyword}`
 
   let results = cacheGet(cacheKey)
@@ -266,6 +301,8 @@ async function handleDmSpotPage(ctx) {
 }
 
 async function handleDmFlacCallback(ctx) {
+  if (!isPrivateCallback(ctx)) return ctx.answerCbQuery()
+
   const trackId = ctx.callbackQuery.data.replace('dm_flac:', '')
   const track   = getFlacTrack(trackId)
 
@@ -282,11 +319,13 @@ async function handleDmFlacCallback(ctx) {
 }
 
 async function handleDmFlacPage(ctx) {
+  if (!isPrivateCallback(ctx)) return ctx.answerCbQuery()
+
   const match = ctx.callbackQuery.data.match(/^dm_flacpage:(\d+):(.+)$/)
   if (!match) return ctx.answerCbQuery()
 
-  const page    = parseInt(match[1])
-  const keyword = match[2]
+  const page     = parseInt(match[1])
+  const keyword  = match[2]
   const cacheKey = `dm_flac:${ctx.from?.id}:${keyword}`
 
   let results = cacheGet(cacheKey)
@@ -303,13 +342,16 @@ async function handleDmFlacPage(ctx) {
 }
 
 // ── DM command router — dipanggil dari createHandler() di index.js ────────────
-// Menerima commandName yang sudah divalidasi, lalu dispatch ke handler yang sesuai.
 
 const DM_COMMANDS = { spot: handleDmSpot, flac: handleDmFlac, apk: handleDmApk }
 
 async function routeDmCommand(ctx, commandName) {
+  const cooldown = DM_COOLDOWN[commandName] ?? 5_000
+  if (isRateLimited(ctx.from?.id, `dm_${commandName}`, cooldown)) {
+    return ctx.reply('⏳ Tunggu sebentar sebelum request berikutnya\\.', replyOpts())
+  }
   const handler = DM_COMMANDS[commandName]
-  if (!handler) return // command tidak didukung di DM — diam saja
+  if (!handler) return
   return handler(ctx)
 }
 
