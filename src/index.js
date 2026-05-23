@@ -10,6 +10,14 @@ const {
 } = require('./features/spotify/spotify.handler')
 const { handleFlacCallback, handleFlacSearchPage } = require('./features/flac/flac.handler')
 const { registerAdminHandlers } = require('./features/admin/admin.handler')
+const {
+  handleDmStart,
+  routeDmCommand,
+  handleDmSpotCallback,
+  handleDmSpotPage,
+  handleDmFlacCallback,
+  handleDmFlacPage,
+} = require('./features/dm/dm.handler')
 const { setupProcessHandlers } = require('./utils/process')
 
 // ---------------------------------------------------------------------------
@@ -45,6 +53,10 @@ function createHandler(commandName, { topic, handler, requiresArg }) {
     const threadId = String(ctx.message.message_thread_id)
     const userId   = ctx.from?.id
     const topics   = GROUP_TOPICS[chatId]
+
+    if (ctx.chat?.type === 'private') {
+      return routeDmCommand(ctx, commandName)
+    }
 
     // Unknown group → ignore
     if (!topics) return
@@ -139,7 +151,7 @@ function createHandler(commandName, { topic, handler, requiresArg }) {
 // ---------------------------------------------------------------------------
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN)
 
-// /help available in all topics — no thread validation needed
+bot.command('start', handleDmStart)
 bot.command('help', handleHelp)
 
 // /random, /top
@@ -175,6 +187,10 @@ bot.action(/^spot:/, handleSpotifyCallback)
 bot.action(/^srch:\d+:.+$/, handleSearchPage)
 bot.action(/^flac:[^:]+$/, handleFlacCallback)
 bot.action(/^flacpage:\d+:.+$/, handleFlacSearchPage)
+bot.action(/^dm_spot:[^:]+$/, handleDmSpotCallback)
+bot.action(/^dm_srch:\d+:.+$/, handleDmSpotPage)
+bot.action(/^dm_flac:[^:]+$/, handleDmFlacCallback)
+bot.action(/^dm_flacpage:\d+:.+$/, handleDmFlacPage)
 registerAdminHandlers(bot)
 setupProcessHandlers(bot)
 bot.launch()
