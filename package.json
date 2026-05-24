@@ -4,7 +4,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "sync:flac":    "node scripts/syncR2Flac.js"
+
   },
   "keywords": [],
   "author": "",

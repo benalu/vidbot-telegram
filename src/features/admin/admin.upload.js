@@ -10,6 +10,7 @@ const { uploadToR2, trackKey }   = require('../../utils/r2')
 const { enrichMetadata }         = require('../../utils/spotify')
 const { saveTrack, updateTrackR2, getTrackByHash, findTrackByTitleArtist }             = require('../spotify/spotify.repo')
 const { saveFlacTrack, updateFlacTrackR2, getFlacTrackByHash, findFlacTrackByTitleArtist } = require('../flac/flac.repo')
+const { syncFlacToApi, syncMp3ToApi } = require('../../utils/api-sync')
 
 const ADMIN_GROUP       = process.env.TELEGRAM_ADMIN_GROUP_ID
 const OWNER_ID          = String(process.env.TELEGRAM_OWNER_ID)
@@ -212,24 +213,33 @@ async function handleAudioUpload(ctx) {
 
     // Upload ke R2 di background
     ;(async () => {
-      if (fileSizeFinal > TG_DOWNLOAD_LIMIT) {
-        logger.info({ event: 'manual_upload_r2_skipped', reason: 'file_too_large_for_bot_api', track: title, size: fileSizeFinal })
-        return
+    if (fileSizeFinal > TG_DOWNLOAD_LIMIT) {
+      logger.info({ event: 'manual_upload_r2_skipped', reason: 'file_too_large_for_bot_api', track: title, size: fileSizeFinal })
+      return
+    }
+    try {
+      const fileLink = await ctx.telegram.getFileLink(fileId)
+      const res      = await axios.get(fileLink.href, { responseType: 'arraybuffer', timeout: 120_000 })
+      const buffer   = Buffer.from(res.data)
+      const r2Url    = await uploadToR2(buffer, key, mime, buffer.length)
+      if (r2Url) {
+      if (isFlac) {
+        updateFlacTrackR2(trackId, r2Url)
+        const { getFlacTrack } = require('../flac/flac.repo')
+        const fullTrack = getFlacTrack(trackId)
+        await syncFlacToApi({ ...fullTrack, r2_url: r2Url })
+      } else {
+        updateTrackR2(trackId, r2Url)
+        const { getTrack } = require('../spotify/spotify.repo')
+        const fullTrack = getTrack(trackId)
+        await syncMp3ToApi({ ...fullTrack, r2_url: r2Url })
       }
-      try {
-        const fileLink = await ctx.telegram.getFileLink(fileId)
-        const res      = await axios.get(fileLink.href, { responseType: 'arraybuffer', timeout: 120_000 })
-        const buffer   = Buffer.from(res.data)
-        const r2Url    = await uploadToR2(buffer, key, mime, buffer.length)
-        if (r2Url) {
-          if (isFlac) updateFlacTrackR2(trackId, r2Url)
-          else        updateTrackR2(trackId, r2Url)
-        }
-        logger.info({ event: 'manual_upload_r2_ok', track: title, artist })
-      } catch (err) {
-        logger.warn({ event: 'manual_upload_r2_failed', track: title, msg: err.message })
-      }
-    })()
+    }
+      logger.info({ event: 'manual_upload_r2_ok', track: title, artist })
+    } catch (err) {
+      logger.warn({ event: 'manual_upload_r2_failed', track: title, msg: err.message })
+    }
+  })()
 
   } catch (err) {
     ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
