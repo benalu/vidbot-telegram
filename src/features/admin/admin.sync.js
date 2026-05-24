@@ -70,7 +70,7 @@ async function handleSyncR2(ctx) {
           const res      = await axios.get(fileLink.href, { responseType: 'arraybuffer', timeout: 60_000 })
           const buffer   = Buffer.from(res.data)
           
-          const key   = trackKey(track.track_id, track.title || 'Track', track.artist || 'Unknown', track._db)
+          const key = trackKey(track.track_id, track.title || 'Track', track.artist || 'Unknown', track._db)
           const r2Url = await uploadToR2(buffer, key, track._db === 'flac' ? 'audio/flac' : 'audio/mpeg', buffer.length)
 
           if (track._db === 'flac') updateFlacTrackR2(track.track_id, r2Url)

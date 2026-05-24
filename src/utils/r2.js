@@ -40,10 +40,11 @@ async function deleteFromR2(key) {
   }))
 }
 
-function trackKey(trackId, title, artist) {
-  // Format: music/Artist - Title (trackId).mp3
+function trackKey(trackId, title, artist, type = 'mp3') {
   const safe = (str) => str.replace(/[^a-zA-Z0-9 \-_]/g, '').trim()
-  return `music/${safe(artist)} - ${safe(title)} (${trackId}).mp3`
+  const ext  = type === 'flac' ? 'flac' : 'mp3'
+  const dir  = type === 'flac' ? 'flac'  : 'music'
+  return `${dir}/${safe(artist)} - ${safe(title)} (${trackId}).${ext}`
 }
 
 module.exports = { uploadToR2, deleteFromR2, trackKey }

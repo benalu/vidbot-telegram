@@ -65,7 +65,8 @@ async function handleDmStart(ctx) {
   const name = escape(ctx.from?.first_name || 'there')
   await ctx.reply(
     `👋 *Halo, ${name}\\!*\n\n` +
-    `Aku bisa bantu cari lagu dan aplikasi dari koleksi yang ada\\.\n\n` +
+    `Aku bisa bantu cari lagu dan aplikasi dari koleksi yang ada\\.\n` +
+    `_Pencarian hanya via keyword — URL tidak didukung di sini\\._\n\n` +
     `*🎵 Spotify \\(MP3\\)*\n` +
     `\`/spot <judul atau artist>\`\n` +
     `_Contoh:_ \`/spot Daft Punk\`\n\n` +

@@ -5,7 +5,7 @@ const fs   = require('fs')
 const path = require('path')
 const mm   = require('music-metadata')
 
-const { uploadToR2 }           = require('../src/utils/r2')
+const { uploadToR2, trackKey } = require('../src/utils/r2')
 const { syncFlacToApi }        = require('../src/utils/api-sync')
 const {
   listFlacTracksWithoutR2,
@@ -64,9 +64,8 @@ async function syncFlac() {
 
       console.log(`☁️  Upload R2: ${artist} - ${title}`)
 
-      const safeName  = (str) => str.replace(/[^a-zA-Z0-9 \-_]/g, '').trim()
-      const customKey = `flac/${safeName(dbMatch.artist)} - ${safeName(dbMatch.title)} (${dbMatch.track_id}).flac`
-      const r2Url     = await uploadToR2(buffer, customKey, 'audio/flac', buffer.length)
+      const key   = trackKey(dbMatch.track_id, dbMatch.title, dbMatch.artist, 'flac')
+      const r2Url = await uploadToR2(buffer, key, 'audio/flac', buffer.length)
 
       updateFlacTrackR2(dbMatch.track_id, r2Url)
       console.log(`  💾 DB updated: ${r2Url}`)

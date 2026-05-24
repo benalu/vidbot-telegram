@@ -11,7 +11,6 @@ const { formatSpotify } = require('./spotify.format')
 const { enrichMetadata } = require('../../utils/spotify')
 const { 
   getTrack, saveTrack, searchTracks, updateTrackR2,
-  updateTrackMeta,
   incrementRequestCount, getTopTracks, getRandomTrack , findTrackByTitleArtist
 } = require('./spotify.repo')
 const { syncMp3ToApi } = require('../../utils/api-sync')
@@ -108,8 +107,8 @@ async function handleSearch(ctx, keyword) {
   if (!results.length) {
     return ctx.reply(
       `\\[ NOT FOUND \\]\n` +
-      `No cached songs found for: *${escape(keyword)}*\n\n` +
-      `_The collection is still empty\\. Send a Spotify track link first:_\n` +
+      `No results for: *${escape(keyword)}*\n\n` +
+      `_Try a different title or artist name, or send a Spotify link to cache it:_\n` +
       `\`/spot open\\.spotify\\.com/track/\\.\\.\\.\``,
       replyOpts(ctx)
     )
@@ -292,6 +291,14 @@ async function handleUrl(ctx, url) {
     }
 
   // Tahap 2: simpan ke DB — audio sudah terkirim, error di sini tidak ganggu user
+  let enriched = {}
+  try {
+    enriched = await enrichMetadata(safeTitle, safeArtist)
+    logger.info({ event: 'spotify_enrich_ok', track: safeTitle })
+  } catch (err) {
+    logger.warn({ event: 'spotify_enrich_background_failed', track: safeTitle, msg: err.message })
+  }
+
   if (trackId && fileId) {
     try {
       saveTrack({
@@ -301,14 +308,14 @@ async function handleUrl(ctx, url) {
         artist:    safeArtist,
         duration:  info.duration  || null,
         quality:   info.quality   || null,
-        thumbnail: info.thumbnail || null,
+        thumbnail: enriched.thumbnail || info.thumbnail || null,
         file_size: size,
         r2_url:    null,
         type:      'mp3',
         source:    'spotify',
-        album:     info.album  || null,
-        year:      info.year   || null,
-        genre:     null,
+        album:     enriched.album || info.album || null,
+        year:      enriched.year  || info.year  || null,
+        genre:     enriched.genre || null,
         file_hash: null,
       })
       notify(ctx.telegram,
@@ -321,42 +328,23 @@ async function handleUrl(ctx, url) {
     }
   }
 
-  // Enrich selesai dulu → R2 → sync, data di REST API sudah lengkap
-  ;(async () => {
-    // Enrich metadata dulu
-    try {
-      const enriched = await enrichMetadata(safeTitle, safeArtist)
-      if (enriched.album || enriched.year || enriched.thumbnail || enriched.genre) {
-        updateTrackMeta(trackId, {
-          album:     enriched.album     || info.album     || null,
-          year:      enriched.year      || info.year      || null,
-          thumbnail: enriched.thumbnail || info.thumbnail || null,
-          genre:     enriched.genre     || null,
-        })
-        logger.info({ event: 'spotify_enrich_ok', track: safeTitle, artist: safeArtist })
-      }
-    } catch (err) {
-      logger.warn({ event: 'spotify_enrich_background_failed', track: safeTitle, msg: err.message })
+  // Tahap 3: R2 upload → sync REST API (data di DB sudah lengkap)
+  try {
+    const r2Url = await uploadToR2(buffer, key, 'audio/mpeg', size)
+    if (trackId && r2Url) {
+      updateTrackR2(trackId, r2Url)
+      const fullTrack = getTrack(trackId)
+      await syncMp3ToApi({ ...fullTrack, r2_url: r2Url })
     }
-
-    // R2 upload → sync REST API (data sudah di-enrich)
-    try {
-      const r2Url = await uploadToR2(buffer, key, 'audio/mpeg', size)
-      if (trackId && r2Url) {
-        updateTrackR2(trackId, r2Url)
-        const fullTrack = getTrack(trackId)
-        await syncMp3ToApi({ ...fullTrack, r2_url: r2Url })
-      }
-      logger.info({ event: 'r2_upload', context: 'public', track: safeTitle })
-    } catch (err) {
-      logger.warn({ event: 'r2_upload_failed', track: safeTitle, msg: err.message })
-      notify(ctx.telegram,
-        `⚠️ *R2 upload gagal*\n` +
-        `*${escape(safeTitle)}* — ${escape(safeArtist)}\n` +
-        `_${escape(err.message)}_`
-      ).catch(() => {})
-    }
-  })()
+    logger.info({ event: 'r2_upload', context: 'public', track: safeTitle })
+  } catch (err) {
+    logger.warn({ event: 'r2_upload_failed', track: safeTitle, msg: err.message })
+    notify(ctx.telegram,
+      `⚠️ *R2 upload gagal*\n` +
+      `*${escape(safeTitle)}* — ${escape(safeArtist)}\n` +
+      `_${escape(err.message)}_`
+    ).catch(() => {})
+  }
 })()
     // IIFE tidak di-await — handler langsung lanjut ke finally
 

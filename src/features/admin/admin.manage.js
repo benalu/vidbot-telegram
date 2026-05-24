@@ -6,7 +6,7 @@ const { deleteFromR2 } = require('../../utils/r2')
 
 // Import Repository
 const { getStats, listTracks, searchTracks, deleteTrack, getTrack } = require('../spotify/spotify.repo')
-const { listFlacTracks, getFlacTrack, deleteFlacTrack } = require('../flac/flac.repo')
+const { listFlacTracks, getFlacTrack, deleteFlacTrack, getFlacStats } = require('../flac/flac.repo')
 
 const OWNER_ID = String(process.env.TELEGRAM_OWNER_ID)
 const PAGE_SIZE = 10
@@ -19,30 +19,47 @@ function formatSize(bytes) {
 
 // ── /dbstats ──────────────────────────────────────────────────────────────────
 async function handleDbStats(ctx) {
-  const s         = getStats()
-  const lastAdded = s.last_added
-    ? new Date(s.last_added * 1000).toLocaleString('id-ID')
+  const mp3  = getStats()       // sudah ada
+  const flac = getFlacStats()   // sudah ada di flac.repo, tinggal dipanggil
+
+  const totalTracks  = mp3.total_tracks  + flac.total_tracks
+  const totalArtists = new Set([
+    ...mp3.topArtists.map(a => a.artist),
+    ...flac.topArtists.map(a => a.artist),
+  ]).size  // deduplicated — artist yang punya MP3 dan FLAC tidak dihitung dua kali
+
+  const withoutR2    = (mp3.without_r2 || 0) + (flac.without_r2 || 0)
+  const r2Count      = totalTracks - withoutR2
+  const r2Pct        = totalTracks > 0 ? Math.round((r2Count / totalTracks) * 100) : 0
+  const barFilled    = Math.round(r2Pct / 10)
+  const bar          = '■'.repeat(barFilled) + '□'.repeat(10 - barFilled)
+
+  const lastAdded = Math.max(mp3.last_added || 0, flac.last_added || 0)
+  const lastAddedStr = lastAdded
+    ? new Date(lastAdded * 1000).toLocaleString('id-ID')
     : 'N/A'
 
-  const r2Count   = s.total_tracks - (s.without_r2 || 0)
-  const r2Pct     = s.total_tracks > 0
-    ? Math.round((r2Count / s.total_tracks) * 100)
-    : 0
-  const barFilled = Math.round(r2Pct / 10)
-  const bar       = '■'.repeat(barFilled) + '□'.repeat(10 - barFilled)
+  // Gabungkan top artists dari keduanya, sort by total, ambil 5 teratas
+  const artistMap = new Map()
+  for (const a of [...mp3.topArtists, ...flac.topArtists]) {
+    artistMap.set(a.artist, (artistMap.get(a.artist) || 0) + a.total)
+  }
+  const topArtists = [...artistMap.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
 
-  const topList = s.topArtists
-    .map((a, i) => `${i + 1}\\. ${escape(a.artist)} \\(${a.total}\\)`)
+  const topList = topArtists
+    .map(([artist, total], i) => `${i + 1}\\. ${escape(artist)} \\(${total}\\)`)
     .join('\n')
 
   await ctx.reply(
     `📊 *Database Stats*\n\n` +
-    `🎵 Total tracks: *${s.total_tracks}*\n` +
-    `🎤 Total artists: *${s.total_artists}*\n` +
-    `🕐 Last added: *${escape(lastAdded)}*\n\n` +
+    `🎵 Total tracks: *${totalTracks}* \\(${mp3.total_tracks} MP3 \\+ ${flac.total_tracks} FLAC\\)\n` +
+    `🎤 Total artists: *${totalArtists}*\n` +
+    `🕐 Last added: *${escape(lastAddedStr)}*\n\n` +
     `*R2 Coverage*\n` +
     `\`${bar}\` ${r2Pct}%\n` +
-    `☁️ ${r2Count} / ${s.total_tracks} tracks\n\n` +
+    `☁️ ${r2Count} / ${totalTracks} tracks\n\n` +
     `*Top Artists:*\n${topList}`,
     { parse_mode: 'MarkdownV2' }
   )
