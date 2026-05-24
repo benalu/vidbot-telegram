@@ -15,6 +15,8 @@ const { uploadToR2, trackKey } = require('../../utils/r2')
 const { enrichMetadata } = require('../../utils/spotify')
 const { getTrack, saveTrack, updateTrackR2 } = require('../spotify/spotify.repo')
 
+const { syncMp3ToApi } = require('../../utils/api-sync')
+
 const ADMIN_GROUP = process.env.TELEGRAM_ADMIN_GROUP_ID
 const OWNER_ID    = String(process.env.TELEGRAM_OWNER_ID)
 
@@ -100,17 +102,55 @@ async function handleAddTrack(ctx, url) {
         } catch (err) {}
 
         saveTrack({
-            track_id: trackId, file_id: sent.audio.file_id, title: safeTitle, artist: safeArtist,
-            duration: info.duration || null, quality: info.quality || null, thumbnail: thumbnailMeta,
-            file_size: fileSize, r2_url: null, type: 'mp3', source: 'spotify',
-            album: albumMeta, year: yearMeta, genre: genreMeta,
-        })
+          track_id:  trackId,
+          file_id:   sent.audio.file_id,
+          title:     safeTitle,
+          artist:    safeArtist,
+          duration:  info.duration || null,
+          quality:   info.quality  || null,
+          thumbnail: thumbnailMeta,
+          file_size: fileSize,
+          r2_url:    null,
+          type:      'mp3',
+          source:    'spotify',
+          album:     albumMeta,
+          year:      yearMeta,
+          genre:     genreMeta,
+          file_hash: null,
+      })
         await ctx.reply(`✅ Berhasil ditambahkan:\n*${escape(safeTitle)}* — ${escape(safeArtist)}`, { parse_mode: 'MarkdownV2' })
       }
 
-      uploadToR2(buffer, key, 'audio/mpeg', fileSize)
-        .then(r2Url => { if (trackId && r2Url) updateTrackR2(trackId, r2Url) })
-        .catch(err => logger.warn({ event: 'r2_upload_failed', msg: err.message }))
+      ;(async () => {
+      // Enrich metadata dulu
+      try {
+        const enriched = await enrichMetadata(safeTitle, safeArtist)
+        if (enriched.album || enriched.year || enriched.thumbnail || enriched.genre) {
+          const { updateTrackMeta } = require('../spotify/spotify.repo')
+          updateTrackMeta(trackId, {
+            album:     enriched.album     || albumMeta     || null,
+            year:      enriched.year      || yearMeta      || null,
+            thumbnail: enriched.thumbnail || thumbnailMeta || null,
+            genre:     enriched.genre     || null,
+          })
+          logger.info({ event: 'addtrack_enrich_ok', track: safeTitle })
+        }
+      } catch (err) {
+        logger.warn({ event: 'addtrack_enrich_failed', track: safeTitle, msg: err.message })
+      }
+
+      // R2 upload → sync REST API
+      try {
+        const r2Url = await uploadToR2(buffer, key, 'audio/mpeg', fileSize)
+        if (trackId && r2Url) {
+          updateTrackR2(trackId, r2Url)
+          const fullTrack = getTrack(trackId)
+          await syncMp3ToApi({ ...fullTrack, r2_url: r2Url })
+        }
+      } catch (err) {
+        logger.warn({ event: 'r2_upload_failed', track: safeTitle, msg: err.message })
+      }
+    })()
 
     } catch (err) {
       ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})

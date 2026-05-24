@@ -14,6 +14,7 @@ const {
   updateTrackMeta,
   incrementRequestCount, getTopTracks, getRandomTrack , findTrackByTitleArtist
 } = require('./spotify.repo')
+const { syncMp3ToApi } = require('../../utils/api-sync')
 
 const pendingUploads = new Map()
 
@@ -320,10 +321,10 @@ async function handleUrl(ctx, url) {
     }
   }
 
-  // Tahap 3: enrich metadata — pure background, tidak ada notify ke user
+  // Enrich selesai dulu → R2 → sync, data di REST API sudah lengkap
   ;(async () => {
+    // Enrich metadata dulu
     try {
-      
       const enriched = await enrichMetadata(safeTitle, safeArtist)
       if (enriched.album || enriched.year || enriched.thumbnail || enriched.genre) {
         updateTrackMeta(trackId, {
@@ -337,22 +338,25 @@ async function handleUrl(ctx, url) {
     } catch (err) {
       logger.warn({ event: 'spotify_enrich_background_failed', track: safeTitle, msg: err.message })
     }
-  })()
 
-  // Tahap 4: R2 upload — pure background
-  uploadToR2(buffer, key, 'audio/mpeg', size)
-    .then(r2Url => {
-      if (trackId && r2Url) updateTrackR2(trackId, r2Url)
+    // R2 upload → sync REST API (data sudah di-enrich)
+    try {
+      const r2Url = await uploadToR2(buffer, key, 'audio/mpeg', size)
+      if (trackId && r2Url) {
+        updateTrackR2(trackId, r2Url)
+        const fullTrack = getTrack(trackId)
+        await syncMp3ToApi({ ...fullTrack, r2_url: r2Url })
+      }
       logger.info({ event: 'r2_upload', context: 'public', track: safeTitle })
-    })
-    .catch(err => {
+    } catch (err) {
       logger.warn({ event: 'r2_upload_failed', track: safeTitle, msg: err.message })
       notify(ctx.telegram,
         `⚠️ *R2 upload gagal*\n` +
         `*${escape(safeTitle)}* — ${escape(safeArtist)}\n` +
         `_${escape(err.message)}_`
       ).catch(() => {})
-    })
+    }
+  })()
 })()
     // IIFE tidak di-await — handler langsung lanjut ke finally
 
