@@ -176,7 +176,7 @@ async function handleAudioUpload(ctx) {
       logger.warn({ event: 'spotify_enrich_failed', track: title, msg: err.message })
     }
 
-    const key          = trackKey(trackId, title, artist)
+    const key = trackKey(trackId, title, artist, isFlac ? 'flac' : 'mp3')
     const fileId       = audio.file_id
     const fileSizeFinal = fileSize || 0
 

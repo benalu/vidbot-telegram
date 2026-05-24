@@ -58,7 +58,10 @@ async function handleAddTrack(ctx, url) {
   const trackId = info.track_id || null
 
   if (trackId && getTrack(trackId)) {
-    return ctx.reply(`ℹ️ Track sudah ada di DB:\n*${escape(info.title)}* — ${escape(info.author)}`, { parse_mode: 'MarkdownV2' })
+    return ctx.reply(
+      `ℹ️ Track sudah ada di DB:\n*${escape(info.title)}* — ${escape(info.author)}`,
+      { parse_mode: 'MarkdownV2' }
+    )
   }
 
   const safeTitle  = info.title  || 'Track'
@@ -79,83 +82,95 @@ async function handleAddTrack(ctx, url) {
     }
   }
 
-  if (!buffer) return ctx.reply(`❌ Gagal download: _${escape(lastErr?.message)}_`, { parse_mode: 'MarkdownV2' })
+  if (!buffer) {
+    return ctx.reply(
+      `❌ Gagal download: _${escape(lastErr?.message)}_`,
+      { parse_mode: 'MarkdownV2' }
+    )
+  }
 
-  const waitMsg = await ctx.reply(`⏳ Uploading ke Telegram\\.\\.\\. \\(${(fileSize / 1024).toFixed(0)} KB\\)`, { parse_mode: 'MarkdownV2' })
-  const key = trackKey(trackId || Date.now().toString(), safeTitle, safeArtist, 'mp3')
-  const audioOpts = { title: safeTitle, performer: safeArtist, thumbnail: info.thumbnail ? { url: info.thumbnail } : undefined }
+  const waitMsg = await ctx.reply(
+    `⏳ Uploading ke Telegram\\.\\.\\. \\(${(fileSize / 1024).toFixed(0)} KB\\)`,
+    { parse_mode: 'MarkdownV2' }
+  )
+  const key      = trackKey(trackId || Date.now().toString(), safeTitle, safeArtist, 'mp3')
+  const audioOpts = {
+    title:     safeTitle,
+    performer: safeArtist,
+    thumbnail: info.thumbnail ? { url: info.thumbnail } : undefined,
+  }
 
   ;(async () => {
     try {
-      const sent = await ctx.replyWithAudio({ source: buffer, filename: `${safeTitle}.mp3` }, audioOpts)
+      const sent = await ctx.replyWithAudio(
+        { source: buffer, filename: `${safeTitle}.mp3` },
+        audioOpts
+      )
       ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
 
-      if (trackId && sent?.audio?.file_id) {
-        let albumMeta = info.album || null, yearMeta = info.year || null, thumbnailMeta = info.thumbnail || null, genreMeta = null
+      if (!trackId || !sent?.audio?.file_id) return
+      const fileId = sent.audio.file_id
 
-        try {
-            const enriched = await enrichMetadata(safeTitle, safeArtist)
-            if (!albumMeta && enriched.album) albumMeta = enriched.album
-            if (!yearMeta && enriched.year) yearMeta = enriched.year
-            if (!thumbnailMeta && enriched.thumbnail) thumbnailMeta = enriched.thumbnail
-            if (enriched.genre) genreMeta = enriched.genre
-        } catch (err) {}
+      await ctx.reply(
+        `✅ Berhasil ditambahkan:\n*${escape(safeTitle)}* — ${escape(safeArtist)}`,
+        { parse_mode: 'MarkdownV2' }
+      )
 
-        saveTrack({
-          track_id:  trackId,
-          file_id:   sent.audio.file_id,
-          title:     safeTitle,
-          artist:    safeArtist,
-          duration:  info.duration || null,
-          quality:   info.quality  || null,
-          thumbnail: thumbnailMeta,
-          file_size: fileSize,
-          r2_url:    null,
-          type:      'mp3',
-          source:    'spotify',
-          album:     albumMeta,
-          year:      yearMeta,
-          genre:     genreMeta,
-          file_hash: null,
-      })
-        await ctx.reply(`✅ Berhasil ditambahkan:\n*${escape(safeTitle)}* — ${escape(safeArtist)}`, { parse_mode: 'MarkdownV2' })
-      }
-
+      // Background: enrich dulu → saveTrack sekali dengan data lengkap → R2 → sync
       ;(async () => {
-      // Enrich metadata dulu
-      try {
-        const enriched = await enrichMetadata(safeTitle, safeArtist)
-        if (enriched.album || enriched.year || enriched.thumbnail || enriched.genre) {
-          const { updateTrackMeta } = require('../spotify/spotify.repo')
-          updateTrackMeta(trackId, {
-            album:     enriched.album     || albumMeta     || null,
-            year:      enriched.year      || yearMeta      || null,
-            thumbnail: enriched.thumbnail || thumbnailMeta || null,
-            genre:     enriched.genre     || null,
-          })
+        // Tahap 1: enrichment sekali saja
+        let enriched = {}
+        try {
+          enriched = await enrichMetadata(safeTitle, safeArtist)
           logger.info({ event: 'addtrack_enrich_ok', track: safeTitle })
+        } catch (err) {
+          logger.warn({ event: 'addtrack_enrich_failed', track: safeTitle, msg: err.message })
         }
-      } catch (err) {
-        logger.warn({ event: 'addtrack_enrich_failed', track: safeTitle, msg: err.message })
-      }
 
-      // R2 upload → sync REST API
-      try {
-        const r2Url = await uploadToR2(buffer, key, 'audio/mpeg', fileSize)
-        if (trackId && r2Url) {
-          updateTrackR2(trackId, r2Url)
-          const fullTrack = getTrack(trackId)
-          await syncMp3ToApi({ ...fullTrack, r2_url: r2Url })
+        // Tahap 2: saveTrack sekali dengan data lengkap
+        try {
+          saveTrack({
+            track_id:  trackId,
+            file_id:   fileId,
+            title:     safeTitle,
+            artist:    safeArtist,
+            duration:  info.duration                        || null,
+            quality:   info.quality                         || null,
+            thumbnail: enriched.thumbnail || info.thumbnail || null,
+            file_size: fileSize,
+            r2_url:    null,
+            type:      'mp3',
+            source:    'spotify',
+            album:     enriched.album     || info.album     || null,
+            year:      enriched.year      || info.year      || null,
+            genre:     enriched.genre                       || null,
+            file_hash: null,
+          })
+        } catch (err) {
+          logger.error({ event: 'addtrack_save_failed', track: safeTitle, msg: err.message })
+          return
         }
-      } catch (err) {
-        logger.warn({ event: 'r2_upload_failed', track: safeTitle, msg: err.message })
-      }
-    })()
+
+        // Tahap 3: upload R2 → sync REST API
+        try {
+          const r2Url = await uploadToR2(buffer, key, 'audio/mpeg', fileSize)
+          if (r2Url) {
+            updateTrackR2(trackId, r2Url)
+            const fullTrack = getTrack(trackId)
+            await syncMp3ToApi({ ...fullTrack, r2_url: r2Url })
+          }
+        } catch (err) {
+          logger.warn({ event: 'r2_upload_failed', track: safeTitle, msg: err.message })
+        }
+      })()
 
     } catch (err) {
       ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
       logger.error({ event: 'addtrack_upload_failed', msg: err.message })
-      ctx.reply(`❌ Upload ke Telegram gagal: _${escape(err.message)}_`, { parse_mode: 'MarkdownV2' }).catch(() => {})
+      ctx.reply(
+        `❌ Upload ke Telegram gagal: _${escape(err.message)}_`,
+        { parse_mode: 'MarkdownV2' }
+      ).catch(() => {})
     }
   })()
 }
