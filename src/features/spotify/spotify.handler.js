@@ -270,26 +270,26 @@ async function handleUrl(ctx, url) {
 
     // Handler selesai setelah delete waitMsg — tidak ada lagi yang di-await
     ;(async () => {
-  // Tahap 1: kirim audio ke Telegram — kalau gagal, stop di sini
-  let fileId = null
-  try {
-    const sent = await ctx.replyWithAudio(
-      { source: buffer, filename: `${safeTitle}.mp3` },
-      audioOpts
-    )
-    fileId = sent?.audio?.file_id
-    resolveFileId(fileId)
-  } catch (err) {
-    resolveFileId(null)
-    logger.error({ event: 'spotify_upload_failed', track: safeTitle, msg: err.message })
-    notify(ctx.telegram,
-      `❌ *Upload Telegram gagal*\n` +
-      `*${escape(safeTitle)}* — ${escape(safeArtist)}\n` +
-      `👤 @${escape(ctx.from?.username || String(ctx.from?.id))}\n` +
-      `_${escape(err.message)}_`
-    ).catch(() => {})
-    return  // ← stop, tidak lanjut ke DB/R2
-  }
+    // Tahap 1: kirim audio ke Telegram — kalau gagal, stop di sini
+    let fileId = null
+    try {
+      const sent = await ctx.replyWithAudio(
+        { source: buffer, filename: `${safeTitle}.mp3` },
+        audioOpts
+      )
+      fileId = sent?.audio?.file_id
+    } catch (err) {
+      logger.error({ event: 'spotify_upload_failed', track: safeTitle, msg: err.message })
+      notify(ctx.telegram,
+        `❌ *Upload Telegram gagal*\n` +
+        `*${escape(safeTitle)}* — ${escape(safeArtist)}\n` +
+        `👤 @${escape(ctx.from?.username || String(ctx.from?.id))}\n` +
+        `_${escape(err.message)}_`
+      ).catch(() => {})
+      return 
+    } finally {
+      resolveFileId(fileId)
+    }
 
   // Tahap 2: simpan ke DB — audio sudah terkirim, error di sini tidak ganggu user
   if (trackId && fileId) {

@@ -159,6 +159,8 @@ bot.use((ctx, next) => {
     process.env.TELEGRAM_ADMIN_GROUP_ID,
   ]
   if (!ctx.chat || type === 'private' || ALLOWED.includes(chatId)) return next()
+
+    return
 })
 
 bot.command('start', handleDmStart)

@@ -12,7 +12,7 @@ const SEARCH_CACHE_MAX = 300
 const searchCache      = new Map()
 
 function cacheSearch(userId, keyword, results) {
-  const key = `${userId}:${keyword}`
+  const key = `flac:${userId}:${keyword}`
   if (searchCache.size >= SEARCH_CACHE_MAX && !searchCache.has(key)) {
     searchCache.delete(searchCache.keys().next().value)
   }
