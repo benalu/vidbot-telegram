@@ -14,7 +14,7 @@ const { handleSyncR2, handleSyncMeta } = require('./admin.sync')
 // Import utilitas & repo untuk handleAddTrack (URL download)
 const { uploadToR2, trackKey } = require('../../utils/r2')
 const { enrichMetadata } = require('../../utils/spotify')
-const { getTrack, saveTrack, updateTrackR2 } = require('../spotify/spotify.repo')
+const { getTrack, saveTrack, updateTrackR2, findTrackByTitleArtist } = require('../spotify/spotify.repo')
 
 const { syncMp3ToApi } = require('../../utils/api-sync')
 
@@ -67,6 +67,14 @@ async function handleAddTrack(ctx, url) {
 
   const safeTitle  = info.title  || 'Track'
   const safeArtist = info.author || 'Unknown'
+
+  const existingByMeta = findTrackByTitleArtist(safeTitle, safeArtist)
+  if (existingByMeta) {
+    return ctx.reply(
+      `ℹ️ Track sudah ada di DB \\(via jalur lain\\):\n*${escape(existingByMeta.title)}* — ${escape(existingByMeta.artist)}\n🆔 \`${existingByMeta.track_id}\``,
+      { parse_mode: 'MarkdownV2' }
+    )
+  }
   const candidates = [download.server_2, download.original, download.server_1].filter(Boolean)
 
   let buffer = null, fileSize = null, lastErr = null
@@ -109,7 +117,7 @@ async function handleAddTrack(ctx, url) {
       )
       ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
 
-      if (!trackId || !sent?.audio?.file_id) return
+      if (!sent?.audio?.file_id) return
       const fileId = sent.audio.file_id
 
       await ctx.reply(

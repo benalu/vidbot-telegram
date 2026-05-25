@@ -7,7 +7,7 @@ const { deleteFlacFromApi, deleteMp3FromApi } = require('../../utils/api-sync')
 
 // Import Repository
 const { getStats, listTracks, searchTracks, deleteTrack, getTrack } = require('../spotify/spotify.repo')
-const { listFlacTracks, getFlacTrack, deleteFlacTrack, getFlacStats } = require('../flac/flac.repo')
+const { listFlacTracks, getFlacTrack, deleteFlacTrack, getFlacStats, searchFlacTracks } = require('../flac/flac.repo')
 
 const OWNER_ID = String(process.env.TELEGRAM_OWNER_ID)
 const PAGE_SIZE = 10
