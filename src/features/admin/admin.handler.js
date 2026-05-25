@@ -112,6 +112,7 @@ async function handleAddTrack(ctx, url) {
     title:     safeTitle,
     performer: safeArtist,
     thumbnail: info.thumbnail ? { url: info.thumbnail } : undefined,
+    message_thread_id: ADMIN_THREAD_PANEL,
   }
 
   ;(async () => {
