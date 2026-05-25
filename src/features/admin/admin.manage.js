@@ -151,17 +151,22 @@ async function handleFindTrack(ctx) {
   const keyword = ctx.message.text.split(/\s+/).slice(1).join(' ').trim()
   if (!keyword) return ctx.reply('❌ Masukkan keyword\\.', { parse_mode: 'MarkdownV2' })
 
-  const results = searchTracks(keyword)
+  const mp3Results  = searchTracks(keyword).map(t => ({ ...t, _db: 'mp3' }))
+  const flacResults = searchFlacTracks(keyword).map(t => ({ ...t, _db: 'flac' }))
+  const results     = [...mp3Results, ...flacResults]
 
   if (!results.length) {
     return ctx.reply(`❌ Tidak ditemukan: *${escape(keyword)}*`, { parse_mode: 'MarkdownV2' })
   }
 
-   const lines = results.map((t, i) =>
-    `${i + 1}\\. *${escape(t.title)}* — ${escape(t.artist)}\n` +
-    `    ${escape(t.duration || 'N/A')}  ·  ${escape(t.quality || 'N/A')}  ·  ${escape(formatSize(t.file_size))}\n` +
-    `    \`${t.track_id}\``
-  ).join('\n\n')
+  const lines = results.map((t, i) => {
+    const badge = t._db === 'flac' ? '🎚 FLAC' : '🎵 MP3'
+    return (
+      `${i + 1}\\. *${escape(t.title)}* — ${escape(t.artist)}\n` +
+      `    ${escape(t.duration || 'N/A')}  ·  ${escape(t.quality || 'N/A')}  ·  ${escape(formatSize(t.file_size))}  ·  ${badge}\n` +
+      `    \`${t.track_id}\``
+    )
+  }).join('\n\n')
 
   await ctx.reply(
     `*Find:* _${escape(keyword)}_ \\(${results.length} results\\)\n\n${lines}`,

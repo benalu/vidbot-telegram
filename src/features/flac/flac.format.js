@@ -1,6 +1,6 @@
 // src/features/flac/flac.format.js
 
-const { escape } = require('./utils')
+const { escape } = require('../../formats/utils')
 
 function formatFlac(entry) {
   const { data: info, download } = entry

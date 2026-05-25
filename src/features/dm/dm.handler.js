@@ -135,7 +135,7 @@ async function handleDmSpot(ctx) {
       )
     }
 
-    const cacheKey = `dm_spot:${ctx.from?.id}:${safeKeyword}`
+    const cacheKey = `cache_spot:${ctx.from?.id}:${safeKeyword}`
     cacheSet(cacheKey, results)
 
     const { text, buttons } = buildSpotifyMessage(results, safeKeyword, 1)
@@ -180,6 +180,13 @@ async function handleDmFlac(ctx) {
     )
   }
 
+  if (normalizeUrl(arg)) {
+    return ctx.reply(
+      `❌ URL tidak didukung di sini\\.\n_Gunakan judul atau nama artist untuk mencari dari koleksi\\._`,
+      replyOpts()
+    )
+  }
+
   const safeKeyword = arg.slice(0, 40).trim()
   const stopTyping  = startTyping(ctx)
 
@@ -193,7 +200,7 @@ async function handleDmFlac(ctx) {
       )
     }
 
-    const cacheKey = `dm_flac:${ctx.from?.id}:${safeKeyword}`
+    const cacheKey = `cache_flac:${ctx.from?.id}:${safeKeyword}`
     cacheSet(cacheKey, results)
 
     const { text, buttons } = buildFlacMessage(results, safeKeyword, 1)
@@ -286,7 +293,7 @@ async function handleDmSpotPage(ctx) {
 
   const page     = parseInt(match[1])
   const keyword  = match[2]
-  const cacheKey = `dm_spot:${ctx.from?.id}:${keyword}`
+  const cacheKey = `cache_spot:${ctx.from?.id}:${keyword}`
 
   let results = cacheGet(cacheKey)
   if (!results) {
@@ -327,7 +334,7 @@ async function handleDmFlacPage(ctx) {
 
   const page     = parseInt(match[1])
   const keyword  = match[2]
-  const cacheKey = `dm_flac:${ctx.from?.id}:${keyword}`
+  const cacheKey = `cache_flac:${ctx.from?.id}:${keyword}`
 
   let results = cacheGet(cacheKey)
   if (!results) {
@@ -352,7 +359,16 @@ async function routeDmCommand(ctx, commandName) {
     return ctx.reply('⏳ Tunggu sebentar sebelum request berikutnya\\.', replyOpts())
   }
   const handler = DM_COMMANDS[commandName]
-  if (!handler) return
+  if (!handler) {
+    return ctx.reply(
+      `❌ Command ini tidak tersedia di sini\\.\n\n` +
+      `_Command yang tersedia di DM:_\n` +
+      `\`/spot\` — cari lagu MP3\n` +
+      `\`/flac\` — cari lagu FLAC\n` +
+      `\`/apk\` — cari APK Android`,
+      replyOpts()
+    )
+  }
   return handler(ctx)
 }
 

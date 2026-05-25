@@ -230,10 +230,6 @@ async function handleUrl(ctx, url) {
     const titleArtistCached = findTrackByTitleArtist(safeTitle, safeArtist)
     if (titleArtistCached) {
       await sendAudioOrFallback(ctx, titleArtistCached, audioOpts, ctx.message.message_thread_id)
-      // Opsional: update track_id jika sebelumnya null (entry dari upload manual)
-      if (trackId && !titleArtistCached.track_id) {
-        // bisa tambah updateTrackId(titleArtistCached.track_id, trackId) kalau mau
-      }
       incrementRequestCount(titleArtistCached.track_id)
       return
     }
@@ -241,7 +237,15 @@ async function handleUrl(ctx, url) {
     // Sedang diproses user lain — tunggu file_id dari pendingUploads
     if (trackId && pendingUploads.has(trackId)) {
       const fileId = await pendingUploads.get(trackId)
-      if (fileId) await ctx.replyWithAudio(fileId, audioOpts)
+      if (fileId) {
+        await ctx.replyWithAudio(fileId, audioOpts)
+      } else {
+        // Upload original gagal — beri tahu user concurrent untuk coba lagi
+        await ctx.reply(
+          `\\[ ERROR \\]\nFailed to process track \\— please try again\\.`,
+          replyOpts(ctx)
+        )
+      }
       return
     }
 
@@ -297,7 +301,7 @@ async function handleUrl(ctx, url) {
     }
 
     // Simpan promise file_id untuk user lain yang request lagu sama
-    const key = trackKey(trackId || Date.now().toString(), safeTitle, safeArtist)
+    const key = trackKey(trackId || Date.now().toString(), safeTitle, safeArtist, 'mp3')
 
     // Resolve dengan file_id supaya pendingUploads bisa dipakai user lain
     let resolveFileId
@@ -471,7 +475,6 @@ async function sendAudioOrFallback(ctx, track, audioOpts, threadId) {
   const MAX_TG_SIZE = 50 * 1024 * 1024  // 50 MB
 
   if (track.file_size && track.file_size > MAX_TG_SIZE) {
-    // File terlalu besar untuk dikirim via Telegram bot — fallback ke R2
     if (track.r2_url) {
       return ctx.reply(
         `🎵 *${escape(track.title)}* — ${escape(track.artist)}\n\n` +
@@ -485,15 +488,12 @@ async function sendAudioOrFallback(ctx, track, audioOpts, threadId) {
         }
       )
     }
-    // Tidak ada R2 URL — ini tidak seharusnya terjadi karena kita filter saat upload,
-    // tapi handle gracefully
     return ctx.reply(
       `❌ File tidak tersedia untuk diputar\\. Hubungi admin\\.`,
       { parse_mode: 'MarkdownV2', message_thread_id: threadId }
     )
   }
 
-  // Normal — kirim sebagai audio
   return ctx.replyWithAudio(track.file_id, audioOpts)
 }
 

@@ -46,8 +46,28 @@ db.exec(`CREATE INDEX IF NOT EXISTS idx_file_hash ON tracks (file_hash)`)
 const stmts = {
   get:    db.prepare(`SELECT * FROM tracks WHERE track_id = ?`),
   insert: db.prepare(`
-    INSERT OR REPLACE INTO tracks (track_id, file_id, title, artist, duration, quality, thumbnail, file_size, r2_url, type, source, album, year, genre, file_hash)
-    VALUES (@track_id, @file_id, @title, @artist, @duration, @quality, @thumbnail, @file_size, @r2_url, @type, @source, @album, @year, @genre, @file_hash)
+    INSERT INTO tracks
+      (track_id, file_id, title, artist, duration, quality, thumbnail,
+      file_size, r2_url, type, source, album, year, genre, file_hash)
+    VALUES
+      (@track_id, @file_id, @title, @artist, @duration, @quality, @thumbnail,
+      @file_size, @r2_url, @type, @source, @album, @year, @genre, @file_hash)
+    ON CONFLICT(track_id) DO UPDATE SET
+      file_id   = excluded.file_id,
+      title     = excluded.title,
+      artist    = excluded.artist,
+      duration  = excluded.duration,
+      quality   = excluded.quality,
+      thumbnail = excluded.thumbnail,
+      file_size = excluded.file_size,
+      r2_url    = excluded.r2_url,
+      type      = excluded.type,
+      source    = excluded.source,
+      album     = excluded.album,
+      year      = excluded.year,
+      genre     = excluded.genre,
+      file_hash = excluded.file_hash
+    -- request_count sengaja tidak di-update agar tidak ter-reset
   `),
   delete: db.prepare(`DELETE FROM tracks WHERE track_id = ?`),
   search: db.prepare(`

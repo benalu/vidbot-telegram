@@ -1,5 +1,6 @@
 // src/features/admin/admin.handler.js
 
+const { v4: uuidv4 } = require('uuid')
 const { escape, normalizeUrl } = require('../../formats/utils')
 const logger = require('../../utils/logger')
 const api = require('../../api/client')
@@ -126,11 +127,11 @@ async function handleAddTrack(ctx, url) {
         } catch (err) {
           logger.warn({ event: 'addtrack_enrich_failed', track: safeTitle, msg: err.message })
         }
-
+        const finalTrackId = trackId || uuidv4()
         // Tahap 2: saveTrack sekali dengan data lengkap
         try {
           saveTrack({
-            track_id:  trackId,
+            track_id:  finalTrackId,
             file_id:   fileId,
             title:     safeTitle,
             artist:    safeArtist,
@@ -155,8 +156,8 @@ async function handleAddTrack(ctx, url) {
         try {
           const r2Url = await uploadToR2(buffer, key, 'audio/mpeg', fileSize)
           if (r2Url) {
-            updateTrackR2(trackId, r2Url)
-            const fullTrack = getTrack(trackId)
+            updateTrackR2(finalTrackId, r2Url)
+            const fullTrack = getTrack(finalTrackId)
             await syncMp3ToApi({ ...fullTrack, r2_url: r2Url })
           }
         } catch (err) {

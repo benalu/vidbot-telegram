@@ -1,7 +1,6 @@
 const api = require('../../api/client')
 const { normalizeUrl } = require('../../formats/utils')
 const { formatTiktok, formatInstagram, formatTwitter, formatThreads } = require('./social.format')
-const { formatSpotify } = require('../spotify/spotify.format')
 
 function replyOpts(ctx) {
   return { message_thread_id: ctx.message.message_thread_id }
@@ -23,23 +22,6 @@ async function handleTiktok(ctx) {
   }
   const data = await api.contentTiktok(url)
   const { text, buttons } = formatTiktok(data)
-  await ctx.reply(text, {
-    parse_mode: 'MarkdownV2',
-    reply_markup: { inline_keyboard: buttons },
-    ...replyOpts(ctx)
-  })
-}
-
-async function handleSpotify(ctx) {
-  const url = parseUrl(ctx)
-  if (!url) {
-    return ctx.reply('❌ URL tidak valid\\. Contoh: `/spot open\\.spotify\\.com/track/\\.\\.\\.`', {
-      parse_mode: 'MarkdownV2',
-      ...replyOpts(ctx)
-    })
-  }
-  const data = await api.contentSpotify(url)
-  const { text, buttons } = formatSpotify(data)
   await ctx.reply(text, {
     parse_mode: 'MarkdownV2',
     reply_markup: { inline_keyboard: buttons },
@@ -98,4 +80,4 @@ async function handleThreads(ctx) {
   })
 }
 
-module.exports = { handleTiktok, handleSpotify, handleInstagram, handleTwitter, handleThreads }
+module.exports = { handleTiktok, handleInstagram, handleTwitter, handleThreads }
