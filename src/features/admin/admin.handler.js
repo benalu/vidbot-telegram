@@ -36,8 +36,8 @@ function adminOnly(handler) {
 }
 
 // ── Notify ke admin grup (dipanggil dari file handler lain)
-async function notify(bot, text) {
-  await bot.telegram.sendMessage(ADMIN_GROUP, text, { parse_mode: 'MarkdownV2' }).catch(() => {})
+async function notify(telegram, text) {
+  await telegram.sendMessage(ADMIN_GROUP, text, { parse_mode: 'MarkdownV2' }).catch(() => {})
 }
 
 // ── /help admin

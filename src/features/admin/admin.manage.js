@@ -3,6 +3,7 @@
 const { escape } = require('../../formats/utils')
 const logger = require('../../utils/logger')
 const { deleteFromR2 } = require('../../utils/r2')
+const { deleteFlacFromApi, deleteMp3FromApi } = require('../../utils/api-sync')
 
 // Import Repository
 const { getStats, listTracks, searchTracks, deleteTrack, getTrack } = require('../spotify/spotify.repo')
@@ -185,19 +186,24 @@ async function handleDelTrack(ctx) {
 
   const deleted = isFlac ? deleteFlacTrack(trackId) : deleteTrack(trackId)
   
-  if (deleted) {
+    if (deleted) {
     if (track.r2_url) {
       const key = track.r2_url.replace(`${process.env.R2_PUBLIC_URL}/`, '')
       deleteFromR2(key).catch(err => logger.warn({ event: 'r2_delete_failed', track_id: trackId, msg: err.message }))
     }
+
+    // Hapus dari REST API (fire and forget — tidak boleh block reply ke admin)
+    const deleteFn = isFlac ? deleteFlacFromApi : deleteMp3FromApi
+    deleteFn(trackId).catch(err => logger.warn({ event: 'api_delete_failed', track_id: trackId, msg: err.message }))
+
     await ctx.reply(
-      `✅ Dihapus dari DB dan R2:\n*${escape(track.title)}* — ${escape(track.artist)}`,
+      `✅ Dihapus dari DB, R2, dan REST API:\n*${escape(track.title)}* — ${escape(track.artist)}`,
       { parse_mode: 'MarkdownV2' }
     )
   } else {
-    await ctx.reply('❌ Gagal menghapus\\.', { parse_mode: 'MarkdownV2' })
+      await ctx.reply('❌ Gagal menghapus\\.', { parse_mode: 'MarkdownV2' })
+    }
   }
-}
 
 module.exports = {
   handleDbStats,

@@ -170,7 +170,26 @@ handleAudioUpload()
      └─ (background) uploadToR2() → syncFlacToApi() / syncMp3ToApi()
 ```
 
-### 3c. Sync REST API (Fire & Forget)
+### 3c. Add Track via Spotify URL (Admin Panel)
+
+```
+Admin kirim Spotify URL di grup admin
+     │
+     ▼
+handleAddTrack()
+     │
+     ├─ api.contentSpotify(url) → ambil info + download URL
+     ├─ Download buffer → replyWithAudio ke Telegram
+     ├─ saveTrack() → SQLite (data awal dari REST API response)
+     │
+     └─ (background IIFE)
+          ├─ enrichMetadata() → Spotify Web API + LastFM (satu kali)
+          ├─ updateTrackMeta() → SQLite
+          ├─ uploadToR2() → Cloudflare R2
+          └─ syncMp3ToApi() → REST API
+```
+
+### 3d. Sync REST API (Fire & Forget)
 
 `syncMp3ToApi` dan `syncFlacToApi` di `api-sync.js` selalu dipanggil tanpa `await` di level tertinggi. Kegagalan hanya di-log, tidak pernah melempar error ke user.
 
@@ -351,9 +370,11 @@ Deduplifikasi refresh token via `_refreshPromise` — aman untuk concurrent requ
 
 ### Cloudflare R2
 Diakses via AWS S3 SDK. Key format:
-- Audio: `music/{Artist} - {Title} ({track_id}).mp3` atau `.flac`
-- Cover: `covers/{track_id}.jpg`
+- MP3: `music/{Artist} - {Title} ({track_id}).mp3`
 - FLAC: `flac/{Artist} - {Title} ({track_id}).flac`
+- Cover: `covers/{track_id}.jpg`
+
+`trackKey(trackId, title, artist, type)` di `r2.js` menghasilkan key yang benar berdasarkan parameter `type` (`'mp3'` | `'flac'`). **Selalu sertakan parameter `type`** saat memanggil fungsi ini — default `'mp3'` hanya fallback, bukan pilihan eksplisit.
 
 ### Spotify Web API
 Hanya untuk **enrichment metadata** (album, year, thumbnail, genre). Tidak untuk download. Token di-cache in-memory, expire 1 menit sebelum waktu Spotify.
@@ -439,7 +460,6 @@ node scripts/syncR2Flac.js
 
 ---
 
-
 ## 11. Review & Temuan Penting
 
 Berikut hasil analisis codebase. Tidak semua perlu diperbaiki segera — prioritasnya ada di To-Do List.
@@ -451,36 +471,59 @@ Berikut hasil analisis codebase. Tidak semua perlu diperbaiki segera — priorit
 - **FLAC 20MB limit sudah benar** — `admin.upload.js` menggunakan `TG_DOWNLOAD_LIMIT = 20MB`; file yang lebih besar langsung di-skip R2 dengan log `manual_upload_r2_skipped`, dan harus diproses via `scripts/syncR2Flac.js` secara manual. MP3 umumnya di bawah 20MB sehingga bisa auto-upload R2 oleh bot
 - **Auto-sync REST API via URL Spotify sudah benar** — alur di `spotify.handler.js`: download → replyWithAudio → background (enrich → saveTrack → uploadR2 → syncMp3ToApi). Selama file di bawah 20MB, REST API terisi otomatis tanpa intervensi manual
 - **`/syncr2` by design tidak sync ke REST API** — ini one-time utility untuk backfill `r2_url` yang kosong. Setelah selesai, jalankan `migrateMp3ToApi.js` / `migrateFlacToApi.js` untuk bulk sync ke REST API. Dua step terpisah by design, bukan bug
-- **Metadata dari Spotify Web API + LastFM** — response REST API internal hanya diambil URL download-nya. Semua metadata (album, year, thumbnail, genre) diambil dari Spotify Web API dan LastFM sebagai single source of truth. Single write ke SQLite, data langsung lengkap ✅ *DONE (direfactor sesi ini)*
+- **Metadata dari Spotify Web API + LastFM** — response REST API internal hanya diambil URL download-nya. Semua metadata (album, year, thumbnail, genre) diambil dari Spotify Web API dan LastFM sebagai single source of truth ✅ *DONE (direfactor sesi lalu)*
+- **`handleAddTrack` enrichment sekarang satu kali** — enrichment dipanggil sekali di background IIFE, hasilnya langsung ke `updateTrackMeta()` + R2 + sync dalam satu alur tanpa race condition ✅ *DONE (sesi ini)*
+- **`trackKey()` di `admin.upload.js` sekarang menyertakan `type`** — FLAC manual upload menghasilkan key R2 yang benar (`flac/` dir, `.flac` ext) ✅ *DONE (sesi lalu)*
+- **`notify()` di `admin.handler.js` sekarang menerima `telegram` instance** — sebelumnya menerima `bot` dan mengakses `bot.telegram.sendMessage` yang menyebabkan semua notifikasi admin silent fail sejak awal. Fix: parameter diganti `telegram`, body jadi `telegram.sendMessage(...)` langsung. Semua pemanggilan di `spotify.handler.js` dengan `ctx.telegram` sudah benar tanpa perlu diubah ✅ *DONE (sesi ini)*
 - **Deduplication upload** via `file_hash` dan `title+artist` mencegah data ganda dari jalur berbeda
 - **WAL mode SQLite** sudah aktif di kedua database
 - **Graceful shutdown** sudah ada via `setupProcessHandlers()`
 - **Rate limiting** per user per command sudah berjalan
 - **Token refresh deduplification** di VidBotClient via `_refreshPromise` sudah benar
 - **Search two-pass** (exact phrase + per kata) memberikan hasil yang lebih relevan
-- **DM keyword-only by design** — URL Spotify sudah di-reject eksplisit di `handleDmSpot()` via `normalizeUrl()`, dan pesan `/start` sudah menyebutkan batasan ini secara eksplisit ✅ *DONE (diupdate sesi ini)*
+- **DM keyword-only by design** — URL Spotify sudah di-reject eksplisit di `handleDmSpot()` via `normalizeUrl()`, dan pesan `/start` sudah menyebutkan batasan ini secara eksplisit ✅ *DONE (sesi lalu)*
 - **Admin group auto-detect Spotify URL** sudah berjalan via `bot.on('text')` di `registerAdminHandlers()`
 - **Bug #1–#4** dari review pertama sudah diperbaiki (import formatSpotify, cache key FLAC, middleware next(), pendingUploads finally)
 
-### ⚠️ Temuan & Potensi Masalah (Review Round 3)
+### ⚠️ Temuan & Potensi Masalah
 
 **1. `flac.format.js` — import path salah, akan crash saat dipakai**
 `require('./utils')` tidak ada di folder `src/features/flac/`. Yang benar adalah `../../formats/utils`. File ini belum diimport di mana pun sehingga tidak crash sekarang, tapi akan crash begitu diimport.
 
-**2. `admin.handler.js` — `enrichMetadata` dipanggil dua kali untuk track yang sama**
-Di `handleAddTrack()`, enrichment dipanggil sekali di dalam IIFE luar lalu dipanggil lagi di nested IIFE background untuk `updateTrackMeta`. Ini hit Spotify API dua kali untuk data yang sama dan membuang rate limit kuota.
+**2. `social.handler.js` — `handleSpotify` dead code tapi masih di-export**
+`commands.js` sudah pakai `handleSpotify` dari `spotify.handler.js`. Export `handleSpotify` dari `social.handler.js` tidak dipakai di mana pun — dua fungsi dengan nama sama di dua file berbeda, rawan bingung saat debugging. Import `formatSpotify` di file ini juga jadi orphan karena hanya dipakai oleh fungsi dead code ini.
 
-**3. `admin.upload.js` — download buffer dari Telegram dua kali**
-Buffer untuk baca ID3 tag (download pertama via `axios.get`) dibuang setelah blok `try` selesai. IIFE background kemudian download ulang file yang sama dari Telegram untuk upload ke R2. Double bandwidth dan double latency untuk setiap upload admin.
-
-**4. `social.handler.js` — `handleSpotify` dead code tapi masih di-export**
-`commands.js` sudah pakai `handleSpotify` dari `spotify.handler.js`. Export `handleSpotify` dari `social.handler.js` tidak dipakai di mana pun — dua fungsi dengan nama sama di dua file berbeda, rawan bingung saat debugging.
-
-**5. Tiga `searchCache` Map tanpa interval cleanup aktif**
+**3. Tiga `searchCache` Map tanpa interval cleanup aktif**
 `spotify.handler.js`, `flac.handler.js`, dan `dm.handler.js` masing-masing punya Map sendiri (max 300 entry tiap Map). Cleanup hanya terjadi saat ada cache hit expired — tidak ada `setInterval` aktif. Dengan tiga Map, potensi 900 entry stale di memory. Aman untuk sekarang, tapi perlu dimonitor kalau user tumbuh.
 
-**6. `dm.handler.js` — cache key prefix `dm_spot:` bentrok naming dengan callback data**
+**4. `dm.handler.js` — cache key prefix `dm_spot:` bentrok naming dengan callback data**
 Cache key untuk search result menggunakan format `dm_spot:{userId}:{keyword}`, sedangkan callback data untuk pilih track juga `dm_spot:{trackId}`. Tidak crash sekarang karena `cacheGet()` hanya dipanggil di `handleDmSpotPage()` — tapi naming rawan collision kalau ada refactor.
+
+**5. `ratelimit.js` — cleanup cutoff lebih pendek dari interval**
+Cleanup `setInterval` jalan tiap 60 detik, tapi cutoff hanya `COOLDOWN_MS * 2` (10 detik). Artinya entry yang sudah tidak berguna sejak 10 detik lalu masih duduk di Map hingga 50 detik berikutnya. Dengan max 2000 entry ini tidak jadi masalah memory, tapi cutoff yang lebih masuk akal adalah `60_000` (sama dengan interval) sehingga entry bersih tepat saat cleanup jalan.
+
+**6. `handleSyncR2` — tidak ada summary invalid file_id**
+Saat `/syncr2` jalan dan ada `file_id` yang sudah expired (misalnya bot pernah diganti token), error per-track hanya di-log individual. Tidak ada hitungan berapa file_id yang tidak valid di summary akhir. Berguna untuk mendeteksi kalau ada masalah sistemik, bukan hanya satu track yang corrupt.
+
+**7. `spotify.handler.js` — `trackKey` dipanggil tanpa `type` eksplisit**
+Di `handleUrl()`, `trackKey` dipanggil tanpa parameter `type`. Default fallback `'mp3'` memang benar untuk jalur ini, tapi tidak konsisten dengan aturan di catatan desain yang menyebut `type` wajib eksplisit. Fix: tambah `'mp3'` sebagai argument keempat.
+
+**8. Resource usage di VPS (2 vCPU, 4 GB RAM, shared dengan bot Discord + REST API)**
+Bot Node.js single-threaded — CPU tidak jadi bottleneck. Yang perlu diperhatikan adalah memory: setiap request `/spot` URL bisa hold buffer 5–10 MB selama background IIFE belum selesai. Beberapa request concurrent bisa hold 30–50 MB buffer sekaligus. Aman di 4 GB tapi perlu PM2 memory limit sebagai safety net.
+
+Rekomendasi `ecosystem.config.js` untuk production:
+```js
+module.exports = {
+  apps: [{
+    name: 'vidops-bot',
+    script: 'src/index.js',
+    max_memory_restart: '512M',  // restart otomatis kalau ada leak
+    instances: 1,                 // JANGAN cluster — SQLite tidak thread-safe
+    watch: false,
+    env: { NODE_ENV: 'production' }
+  }]
+}
+```
 
 ---
 
@@ -493,6 +536,7 @@ Cache key untuk search result menggunakan format `dm_spot:{userId}:{keyword}`, s
 > - File FLAC >20MB tidak bisa di-upload ke R2 oleh bot secara otomatis — harus via `scripts/syncR2Flac.js` manual. File MP3 umumnya <20MB sehingga auto-upload R2 oleh bot adalah perilaku yang benar
 > - `/syncr2` adalah one-time utility untuk backfill `r2_url` kosong di SQLite, bukan untuk sync ke REST API. Setelah `/syncr2`, jalankan migration script untuk sync ke REST API
 > - Metadata (album, year, thumbnail, genre) diambil dari Spotify Web API + LastFM, bukan dari response REST API internal. REST API internal hanya dipakai untuk URL download
+> - `trackKey()` **wajib** dipanggil dengan parameter `type` eksplisit (`'mp3'` atau `'flac'`) — default `'mp3'` hanya fallback, bukan pilihan yang disengaja
 
 ---
 
@@ -502,8 +546,14 @@ Cache key untuk search result menggunakan format `dm_spot:{userId}:{keyword}`, s
 - [x] ~~**Fix cache key mismatch** di `flac.handler.js`~~ ✅ *DONE*
 - [x] ~~**Fix middleware `bot.use`** di `index.js`~~ ✅ *DONE*
 - [x] ~~**Fix `pendingUploads` leak** di `spotify.handler.js`~~ ✅ *DONE*
-- [x] ~~**Fix pesan NOT FOUND yang menyesatkan** di `spotify.handler.js`~~ ✅ *DONE (sesi ini)*
-- [x] ~~**Fix `/dbstats` tidak include koleksi FLAC** di `admin.manage.js`~~ ✅ *DONE (sesi ini)*
+- [x] ~~**Fix pesan NOT FOUND yang menyesatkan** di `spotify.handler.js`~~ ✅ *DONE*
+- [x] ~~**Fix `/dbstats` tidak include koleksi FLAC** di `admin.manage.js`~~ ✅ *DONE*
+- [x] ~~**Fix `trackKey()` dipanggil tanpa `type` di `admin.upload.js`**~~ ✅ *DONE (sesi ini)*
+  Semua manual upload FLAC sebelumnya menghasilkan key R2 yang salah (`music/` dir, `.mp3` ext). Fix: `trackKey(trackId, title, artist, isFlac ? 'flac' : 'mp3')`.
+- [x] ~~**Fix `enrichMetadata` dipanggil dua kali + race condition di `admin.handler.js`**~~ ✅ *DONE (sesi lalu)*
+  `handleAddTrack()` sekarang punya satu IIFE background dengan satu enrichment call: enrich → `saveTrack()` sekali dengan data lengkap → `uploadToR2()` → `syncMp3ToApi()`. Tidak ada nested IIFE, tidak ada race condition.
+- [x] ~~**Fix `notify()` parameter salah di `admin.handler.js`**~~ ✅ *DONE (sesi ini)*
+  `notify(bot, text)` mengakses `bot.telegram.sendMessage` — padahal semua pemanggilan dari `spotify.handler.js` mengirim `ctx.telegram` (bukan bot instance), sehingga `bot.telegram` menjadi `undefined` dan semua notifikasi admin silent fail sejak awal. Fix: ganti parameter jadi `notify(telegram, text)` dan body jadi `telegram.sendMessage(...)` langsung.
 
 - [ ] **Fix import path di `flac.format.js`**
   `require('./utils')` tidak ada di folder `src/features/flac/`. Ganti ke `../../formats/utils`. File ini belum dipakai jadi tidak crash sekarang, tapi akan crash begitu diimport.
@@ -512,25 +562,21 @@ Cache key untuk search result menggunakan format `dm_spot:{userId}:{keyword}`, s
 
 ### 🟡 Penting (Planned)
 
-- [x] ~~**Refactor `trackKey()` di `r2.js`** — tambah parameter `type`~~ ✅ *DONE (sesi ini)*
-  Fungsi sekarang menerima `type` (`'mp3'` | `'flac'`), menghasilkan direktori dan ekstensi yang tepat. Custom key manual di `admin.sync.js` dan `syncR2Flac.js` sudah dihapus.
-
-- [x] ~~**Refactor metadata `spotify.handler.js`** — single write, Spotify Web API + LastFM sebagai source of truth~~ ✅ *DONE (sesi ini)*
-  Sekarang enrich dulu di background, baru `saveTrack()` sekali dengan data lengkap. Import `updateTrackMeta` di handler ini sudah tidak dipakai dan bisa dihapus.
-
-- [x] ~~**Update `/start` DM** — perjelas batasan keyword-only~~ ✅ *DONE (sesi ini)*
-
-- [ ] **Hapus enrichment redundan di `admin.handler.js`**
-  `handleAddTrack()` masih memanggil `enrichMetadata()` dua kali. Cukup satu kali di background IIFE setelah `saveTrack()`, lalu langsung `updateTrackMeta()` + R2 + sync dalam satu alur.
+- [x] ~~**Refactor `trackKey()` di `r2.js`** — tambah parameter `type`~~ ✅ *DONE*
+- [x] ~~**Refactor metadata `spotify.handler.js`** — single write, Spotify Web API + LastFM sebagai source of truth~~ ✅ *DONE*
+- [x] ~~**Update `/start` DM** — perjelas batasan keyword-only~~ ✅ *DONE*
 
 - [ ] **Hapus dead code `handleSpotify` di `social.handler.js`**
-  Fungsi ini tidak dipakai di mana pun. Hapus dari export dan hapus import `formatSpotify` yang mengikutinya.
+  Fungsi ini tidak dipakai di mana pun. Hapus fungsi `handleSpotify`, hapus import `formatSpotify` di baris atas, dan hapus dari `module.exports`. Kalau tidak dihapus, dua fungsi bernama `handleSpotify` di dua file berbeda akan terus jadi sumber kebingungan saat debugging.
 
 - [ ] **Hapus atau integrasikan `flac.format.js`**
-  File ini ada tapi tidak pernah diimport. Kalau masih relevan, pakai di `flac.handler.js`. Kalau tidak, hapus agar tidak membingungkan.
+  File ini ada tapi tidak pernah diimport. Kalau masih relevan, pakai di `flac.handler.js`. Kalau tidak, hapus agar tidak membingungkan. Sebelum mengintegrasikan, fix dulu import path-nya (lihat Critical di atas).
 
 - [ ] **Rename cache key prefix di `dm.handler.js`**
-  Ganti prefix cache search menjadi `cache_spot:` dan `cache_flac:` agar tidak bentrok naming dengan callback data `dm_spot:` dan `dm_flac:`.
+  Ganti prefix cache search menjadi `cache_spot:` dan `cache_flac:` agar tidak bentrok naming dengan callback data `dm_spot:` dan `dm_flac:`. Update juga di `handleDmSpotPage()` dan `handleDmFlacPage()` yang membaca cache dengan key yang sama.
+
+- [ ] **Tambah `type` eksplisit di `trackKey()` dalam `spotify.handler.js`**
+  Di `handleUrl()`, `trackKey` dipanggil tanpa parameter `type`. Secara fungsional benar (default `'mp3'`), tapi tidak konsisten dengan aturan bahwa `type` wajib eksplisit. Fix: `trackKey(trackId || Date.now().toString(), safeTitle, safeArtist, 'mp3')`.
 
 ---
 
@@ -539,17 +585,26 @@ Cache key untuk search result menggunakan format `dm_spot:{userId}:{keyword}`, s
 - [ ] **Refactor `admin.upload.js` — reuse buffer ID3 untuk upload R2**
   Buffer yang sudah di-download untuk parsing ID3 tag seharusnya di-pass ke IIFE background untuk upload R2, bukan download ulang dari Telegram. Simpan `buffer` di variable luar blok `try` ID3, lalu gunakan kembali di IIFE. Ini memangkas bandwidth dan latency jadi setengahnya untuk setiap upload admin.
 
+- [ ] **Setup PM2 ecosystem config sebelum production**
+  Buat `ecosystem.config.js` di root project dengan `max_memory_restart: '512M'` dan `instances: 1`. Lihat contoh di Section 11. Ini safety net kalau ada memory leak yang tidak terduga — PM2 restart otomatis tanpa intervensi manual.
+
 - [ ] **Admin: command `/syncapi`**
   Trigger manual sync dari bot — kirim semua track di SQLite yang punya `r2_url` tapi belum/gagal masuk REST API. Ini versi interaktif dari migration script, berguna saat REST API sempat down.
 
 - [ ] **Admin: command `/status`**
-  Dashboard ringkas untuk admin: uptime bot, jumlah track MP3/FLAC, R2 coverage percentage, status ping ke REST API, dan memory usage process.
+  Dashboard ringkas untuk admin: uptime bot, jumlah track MP3/FLAC, R2 coverage percentage, status ping ke REST API, dan memory usage process (`process.memoryUsage().heapUsed`).
+
+- [ ] **Fix `ratelimit.js` — sesuaikan cutoff dengan interval cleanup**
+  Ganti `COOLDOWN_MS * 2` menjadi `60_000` (sama dengan interval) agar entry yang sudah tidak berguna bersih tepat saat cleanup jalan, bukan tertinggal hingga 50 detik.
 
 - [ ] **Simple retry queue untuk REST API sync**
   Simpan payload yang gagal di-sync ke tabel SQLite kecil (`sync_queue`). Background job coba retry setiap N menit. Ini menghilangkan kebutuhan jalankan migration script secara manual saat REST API sempat down.
 
 - [ ] **Search ranking improvement**
   Saat ini urutan hasil hanya by `created_at DESC`. Tambahkan boost untuk: exact title match > partial title match > artist match. Bisa dilakukan di layer JS setelah query, tanpa ubah skema DB.
+
+- [ ] **`syncR2Flac.js` — mode `--dry-run`**
+  Tambahkan flag `--dry-run` untuk preview "ini yang akan diupload" tanpa benar-benar upload ke R2. Berguna untuk verifikasi matching ID3 tag sebelum commit operasi yang tidak bisa di-undo.
 
 - [ ] **`syncR2Flac.js` — mode `--insert`**
   Script saat ini mengharuskan track sudah ada di SQLite (hanya matching). Tambahkan flag `--insert` untuk otomatis insert track baru ke SQLite dari ID3 tag file `.flac` yang ada di folder, tanpa perlu entry manual dulu.

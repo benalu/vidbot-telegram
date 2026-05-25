@@ -76,4 +76,51 @@ async function syncMp3ToApi(track) {
   }, 'mp3')
 }
 
-module.exports = { syncFlacToApi, syncMp3ToApi }
+// ─── Delete ───────────────────────────────────────────────────────────────────
+
+async function deleteFlacFromApi(trackId) {
+  if (!REST_API_URL || !REST_API_KEY) {
+    logger.warn({ event: 'api_delete_skipped', reason: 'env not set', track_id: trackId })
+    return
+  }
+  try {
+    await axios.delete(`${REST_API_URL}/admin/downloader/flac/track/${trackId}`, {
+      headers: { 'X-Master-Key': REST_API_KEY },
+      timeout: 10_000,
+    })
+    logger.info({ event: 'api_delete_ok', type: 'flac', track_id: trackId })
+  } catch (err) {
+    const code = err?.response?.data?.code
+    const msg  = err?.response?.data?.message || err.message
+    // 404 = sudah tidak ada di REST API, tidak perlu error
+    if (err?.response?.status === 404) {
+      logger.info({ event: 'api_delete_not_found', type: 'flac', track_id: trackId })
+      return
+    }
+    logger.warn({ event: 'api_delete_failed', type: 'flac', track_id: trackId, code, msg })
+  }
+}
+
+async function deleteMp3FromApi(trackId) {
+  if (!REST_API_URL || !REST_API_KEY) {
+    logger.warn({ event: 'api_delete_skipped', reason: 'env not set', track_id: trackId })
+    return
+  }
+  try {
+    await axios.delete(`${REST_API_URL}/admin/downloader/mp3/track/${trackId}`, {
+      headers: { 'X-Master-Key': REST_API_KEY },
+      timeout: 10_000,
+    })
+    logger.info({ event: 'api_delete_ok', type: 'mp3', track_id: trackId })
+  } catch (err) {
+    const code = err?.response?.data?.code
+    const msg  = err?.response?.data?.message || err.message
+    if (err?.response?.status === 404) {
+      logger.info({ event: 'api_delete_not_found', type: 'mp3', track_id: trackId })
+      return
+    }
+    logger.warn({ event: 'api_delete_failed', type: 'mp3', track_id: trackId, code, msg })
+  }
+}
+
+module.exports = { syncFlacToApi, syncMp3ToApi, deleteFlacFromApi, deleteMp3FromApi }
