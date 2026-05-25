@@ -202,6 +202,7 @@ async function handleSpotifyCallback(ctx) {
 // ── URL: download + upload ────────────────────────────────────────────────────
 async function handleUrl(ctx, url) {
   const waitMsg = await ctx.reply('_Processing audio, please wait\\.\\.\\._', replyOpts(ctx))
+  const deleteWait = () => ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
 
   try {
     const data                     = await api.contentSpotify(url)
@@ -216,6 +217,7 @@ async function handleUrl(ctx, url) {
     if (trackId) {
       const cached = getTrack(trackId)
       if (cached) {
+        deleteWait()
         await sendAudioOrFallback(ctx, cached, audioOpts, ctx.message.message_thread_id)
         incrementRequestCount(trackId)
         notify(ctx.telegram,
@@ -229,6 +231,7 @@ async function handleUrl(ctx, url) {
 
     const titleArtistCached = findTrackByTitleArtist(safeTitle, safeArtist)
     if (titleArtistCached) {
+      deleteWait()
       await sendAudioOrFallback(ctx, titleArtistCached, audioOpts, ctx.message.message_thread_id)
       incrementRequestCount(titleArtistCached.track_id)
       return
@@ -237,6 +240,7 @@ async function handleUrl(ctx, url) {
     // Sedang diproses user lain — tunggu file_id dari pendingUploads
     if (trackId && pendingUploads.has(trackId)) {
       const fileId = await pendingUploads.get(trackId)
+      deleteWait()
       if (fileId) {
         await ctx.replyWithAudio(fileId, audioOpts)
       } else {
@@ -273,6 +277,7 @@ async function handleUrl(ctx, url) {
     }
 
     if (!buffer) {
+      deleteWait()
       await ctx.reply(
         `\\[ ERROR \\]\nFailed to download track: _${escape(lastErr?.message)}_`,
         replyOpts(ctx)
@@ -291,6 +296,7 @@ async function handleUrl(ctx, url) {
           expected: Math.round(expectedSec),
           actual:   Math.round(actualSec),
         })
+        deleteWait()
         await ctx.reply(
           `\\[ ERROR \\]\nFailed to process track \\- audio file appears incomplete\\.\n` +
           `_Please try again later\\._`,
@@ -321,8 +327,10 @@ async function handleUrl(ctx, url) {
         { source: buffer, filename: `${safeTitle}.mp3` },
         audioOpts
       )
+      deleteWait()
       fileId = sent?.audio?.file_id
     } catch (err) {
+      deleteWait()
       logger.error({ event: 'spotify_upload_failed', track: safeTitle, msg: err.message })
       notify(ctx.telegram,
         `❌ *Upload Telegram gagal*\n` +
@@ -394,6 +402,7 @@ async function handleUrl(ctx, url) {
     // IIFE tidak di-await — handler langsung lanjut ke finally
 
   } catch (error) {
+    deleteWait()
     await ctx.reply(
       `\\[ ERROR \\]\nFailed to process track: _${escape(error.message)}_`,
       replyOpts(ctx)

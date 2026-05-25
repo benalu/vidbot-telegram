@@ -13,8 +13,11 @@ const { handleSyncR2, handleSyncMeta } = require('./admin.sync')
 
 // Import utilitas & repo untuk handleAddTrack (URL download)
 const { uploadToR2, trackKey } = require('../../utils/r2')
+const { startTyping } = require('../../utils/typing')
 const { enrichMetadata } = require('../../utils/spotify')
 const { getTrack, saveTrack, updateTrackR2, findTrackByTitleArtist } = require('../spotify/spotify.repo')
+
+
 
 const { syncMp3ToApi } = require('../../utils/api-sync')
 
@@ -59,135 +62,149 @@ async function handleAdminHelp(ctx) {
 
 // ── Add Track via Spotify URL
 async function handleAddTrack(ctx, url) {
-  const data = await api.contentSpotify(url)
-  const { data: info, download } = data
-  const trackId = info.track_id || null
+  const stopTyping = startTyping(ctx, ADMIN_THREAD_PANEL)
 
-  if (trackId && getTrack(trackId)) {
-    return ctx.reply(
-      `ℹ️ Track sudah ada di DB:\n*${escape(info.title)}* — ${escape(info.author)}`,
-      { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
-    )
-  }
+  try {
+    const data = await api.contentSpotify(url)
+    const { data: info, download } = data
+    const trackId = info.track_id || null
 
-  const safeTitle  = info.title  || 'Track'
-  const safeArtist = info.author || 'Unknown'
-
-  const existingByMeta = findTrackByTitleArtist(safeTitle, safeArtist)
-  if (existingByMeta) {
-    return ctx.reply(
-      `ℹ️ Track sudah ada di DB \\(via jalur lain\\):\n*${escape(existingByMeta.title)}* — ${escape(existingByMeta.artist)}\n🆔 \`${existingByMeta.track_id}\``,
-      { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
-    )
-  }
-  const candidates = [download.server_2, download.original, download.server_1].filter(Boolean)
-
-  let buffer = null, fileSize = null, lastErr = null
-
-  for (const candidate of candidates) {
-    try {
-      const res = await axios.get(candidate, { responseType: 'arraybuffer', timeout: 60_000 })
-      buffer = Buffer.from(res.data)
-      fileSize = buffer.length
-      break
-    } catch (err) {
-      lastErr = err
-      logger.warn({ event: 'addtrack_download_failed', msg: err.message })
-    }
-  }
-
-  if (!buffer) {
-    return ctx.reply(
-      `❌ Gagal download: _${escape(lastErr?.message)}_`,
-      { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
-    )
-  }
-
-  const waitMsg = await ctx.reply(
-    `⏳ Uploading ke Telegram\\.\\.\\. \\(${(fileSize / 1024).toFixed(0)} KB\\)`,
-    { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
-  )
-  const key      = trackKey(trackId || Date.now().toString(), safeTitle, safeArtist, 'mp3')
-  const audioOpts = {
-    title:     safeTitle,
-    performer: safeArtist,
-    thumbnail: info.thumbnail ? { url: info.thumbnail } : undefined,
-    message_thread_id: ADMIN_THREAD_PANEL,
-  }
-
-  ;(async () => {
-    try {
-      const sent = await ctx.replyWithAudio(
-        { source: buffer, filename: `${safeTitle}.mp3` },
-        audioOpts
-      )
-      ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
-
-      if (!sent?.audio?.file_id) return
-      const fileId = sent.audio.file_id
-
-      await ctx.reply(
-        `✅ Berhasil ditambahkan:\n*${escape(safeTitle)}* — ${escape(safeArtist)}`,
+    if (trackId && getTrack(trackId)) {
+      stopTyping()
+      return ctx.reply(
+        `ℹ️ Track sudah ada di DB:\n*${escape(info.title)}* — ${escape(info.author)}`,
         { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
       )
+    }
 
-      // Background: enrich dulu → saveTrack sekali dengan data lengkap → R2 → sync
-      ;(async () => {
-        // Tahap 1: enrichment sekali saja
-        let enriched = {}
-        try {
-          enriched = await enrichMetadata(safeTitle, safeArtist)
-          logger.info({ event: 'addtrack_enrich_ok', track: safeTitle })
-        } catch (err) {
-          logger.warn({ event: 'addtrack_enrich_failed', track: safeTitle, msg: err.message })
-        }
-        const finalTrackId = trackId || uuidv4()
-        // Tahap 2: saveTrack sekali dengan data lengkap
-        try {
-          saveTrack({
-            track_id:  finalTrackId,
-            file_id:   fileId,
-            title:     safeTitle,
-            artist:    safeArtist,
-            duration:  info.duration                        || null,
-            quality:   info.quality                         || null,
-            thumbnail: enriched.thumbnail || info.thumbnail || null,
-            file_size: fileSize,
-            r2_url:    null,
-            type:      'mp3',
-            source:    'spotify',
-            album:     enriched.album     || info.album     || null,
-            year:      enriched.year      || info.year      || null,
-            genre:     enriched.genre                       || null,
-            file_hash: null,
-          })
-        } catch (err) {
-          logger.error({ event: 'addtrack_save_failed', track: safeTitle, msg: err.message })
-          return
-        }
+    const safeTitle  = info.title  || 'Track'
+    const safeArtist = info.author || 'Unknown'
 
-        // Tahap 3: upload R2 → sync REST API
-        try {
-          const r2Url = await uploadToR2(buffer, key, 'audio/mpeg', fileSize)
-          if (r2Url) {
-            updateTrackR2(finalTrackId, r2Url)
-            const fullTrack = getTrack(finalTrackId)
-            await syncMp3ToApi({ ...fullTrack, r2_url: r2Url })
+    const existingByMeta = findTrackByTitleArtist(safeTitle, safeArtist)
+    if (existingByMeta) {
+      stopTyping()
+      return ctx.reply(
+        `ℹ️ Track sudah ada di DB \\(via jalur lain\\):\n*${escape(existingByMeta.title)}* — ${escape(existingByMeta.artist)}\n🆔 \`${existingByMeta.track_id}\``,
+        { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
+      )
+    }
+
+    const candidates = [download.server_2, download.original, download.server_1].filter(Boolean)
+
+    let buffer = null, fileSize = null, lastErr = null
+
+    for (const candidate of candidates) {
+      try {
+        const res = await axios.get(candidate, { responseType: 'arraybuffer', timeout: 60_000 })
+        buffer = Buffer.from(res.data)
+        fileSize = buffer.length
+        break
+      } catch (err) {
+        lastErr = err
+        logger.warn({ event: 'addtrack_download_failed', msg: err.message })
+      }
+    }
+
+    if (!buffer) {
+      stopTyping()
+      return ctx.reply(
+        `❌ Gagal download: _${escape(lastErr?.message)}_`,
+        { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
+      )
+    }
+
+    // Dari sini IIFE yang bertanggung jawab, typing bisa distop
+    stopTyping()
+
+    const waitMsg = await ctx.reply(
+      `⏳ Uploading ke Telegram\\.\\.\\. \\(${(fileSize / 1024).toFixed(0)} KB\\)`,
+      { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
+    )
+
+    const key = trackKey(trackId || Date.now().toString(), safeTitle, safeArtist, 'mp3')
+    const audioOpts = {
+      title:     safeTitle,
+      performer: safeArtist,
+      thumbnail: info.thumbnail ? { url: info.thumbnail } : undefined,
+      message_thread_id: ADMIN_THREAD_PANEL,
+    }
+
+    ;(async () => {
+      try {
+        const sent = await ctx.replyWithAudio(
+          { source: buffer, filename: `${safeTitle}.mp3` },
+          audioOpts
+        )
+        ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
+
+        if (!sent?.audio?.file_id) return
+        const fileId = sent.audio.file_id
+
+        await ctx.reply(
+          `✅ Berhasil ditambahkan:\n*${escape(safeTitle)}* — ${escape(safeArtist)}`,
+          { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
+        )
+
+        ;(async () => {
+          let enriched = {}
+          try {
+            enriched = await enrichMetadata(safeTitle, safeArtist)
+            logger.info({ event: 'addtrack_enrich_ok', track: safeTitle })
+          } catch (err) {
+            logger.warn({ event: 'addtrack_enrich_failed', track: safeTitle, msg: err.message })
           }
-        } catch (err) {
-          logger.warn({ event: 'r2_upload_failed', track: safeTitle, msg: err.message })
-        }
-      })()
 
-    } catch (err) {
-      ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
-      logger.error({ event: 'addtrack_upload_failed', msg: err.message })
-      ctx.reply(
-        `❌ Upload ke Telegram gagal: _${escape(err.message)}_`,
-        { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
-      ).catch(() => {})
-    }
-  })()
+          const finalTrackId = trackId || uuidv4()
+
+          try {
+            saveTrack({
+              track_id:  finalTrackId,
+              file_id:   fileId,
+              title:     safeTitle,
+              artist:    safeArtist,
+              duration:  info.duration                        || null,
+              quality:   info.quality                         || null,
+              thumbnail: enriched.thumbnail || info.thumbnail || null,
+              file_size: fileSize,
+              r2_url:    null,
+              type:      'mp3',
+              source:    'spotify',
+              album:     enriched.album     || info.album     || null,
+              year:      enriched.year      || info.year      || null,
+              genre:     enriched.genre                       || null,
+              file_hash: null,
+            })
+          } catch (err) {
+            logger.error({ event: 'addtrack_save_failed', track: safeTitle, msg: err.message })
+            return
+          }
+
+          try {
+            const r2Url = await uploadToR2(buffer, key, 'audio/mpeg', fileSize)
+            if (r2Url) {
+              updateTrackR2(finalTrackId, r2Url)
+              const fullTrack = getTrack(finalTrackId)
+              await syncMp3ToApi({ ...fullTrack, r2_url: r2Url })
+            }
+          } catch (err) {
+            logger.warn({ event: 'r2_upload_failed', track: safeTitle, msg: err.message })
+          }
+        })()
+
+      } catch (err) {
+        ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
+        logger.error({ event: 'addtrack_upload_failed', msg: err.message })
+        ctx.reply(
+          `❌ Upload ke Telegram gagal: _${escape(err.message)}_`,
+          { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
+        ).catch(() => {})
+      }
+    })()
+
+  } catch (err) {
+    stopTyping()
+    throw err
+  }
 }
 
 // ── Register semua handler
