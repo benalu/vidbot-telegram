@@ -194,7 +194,7 @@ async function handleDelTrack(ctx) {
 
     // Hapus dari REST API (fire and forget — tidak boleh block reply ke admin)
     const deleteFn = isFlac ? deleteFlacFromApi : deleteMp3FromApi
-    deleteFn(trackId).catch(err => logger.warn({ event: 'api_delete_failed', track_id: trackId, msg: err.message }))
+    deleteFn(trackId)
 
     await ctx.reply(
       `✅ Dihapus dari DB, R2, dan REST API:\n*${escape(track.title)}* — ${escape(track.artist)}`,

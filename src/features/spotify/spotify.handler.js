@@ -1,6 +1,7 @@
 //src/features/spotify/spotify.handler.js
 
 const axios  = require('axios')
+const mm = require('music-metadata')
 const api = require('../../api/client')
 const logger = require('../../utils/logger')
 const { escape, normalizeUrl } = require('../../formats/utils')
@@ -14,6 +15,26 @@ const {
   incrementRequestCount, getTopTracks, getRandomTrack , findTrackByTitleArtist
 } = require('./spotify.repo')
 const { syncMp3ToApi } = require('../../utils/api-sync')
+
+async function parseAudioDuration(buffer) {
+  try {
+    const meta = await mm.parseBuffer(buffer, { duration: true })
+    return meta.format?.duration || null
+  } catch {
+    return null
+  }
+}
+
+function parseDurationToSeconds(durationStr) {
+  if (!durationStr) return null
+  if (String(durationStr).includes(':')) {
+    const parts = String(durationStr).split(':').map(Number)
+    if (parts.length === 2) return parts[0] * 60 + parts[1]
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2]
+  }
+  const n = parseFloat(durationStr)
+  return isNaN(n) ? null : n
+}
 
 const pendingUploads = new Map()
 
@@ -253,6 +274,26 @@ async function handleUrl(ctx, url) {
         replyOpts(ctx)
       )
       return
+    }
+
+    // ── Validasi durasi sebelum kirim ke user ─────────────────────────────────
+    const expectedSec = parseDurationToSeconds(info.duration)
+    if (expectedSec && expectedSec > 30) {
+      const actualSec = await parseAudioDuration(buffer)
+      if (actualSec !== null && actualSec < expectedSec * 0.7) {
+        logger.warn({
+          event:    'audio_duration_mismatch',
+          track:    safeTitle,
+          expected: Math.round(expectedSec),
+          actual:   Math.round(actualSec),
+        })
+        await ctx.reply(
+          `\\[ ERROR \\]\nFailed to process track \\- audio file appears incomplete\\.\n` +
+          `_Please try again later\\._`,
+          replyOpts(ctx)
+        )
+        return
+      }
     }
 
     // Simpan promise file_id untuk user lain yang request lagu sama
