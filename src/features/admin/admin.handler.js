@@ -18,8 +18,10 @@ const { getTrack, saveTrack, updateTrackR2, findTrackByTitleArtist } = require('
 
 const { syncMp3ToApi } = require('../../utils/api-sync')
 
-const ADMIN_GROUP = process.env.TELEGRAM_ADMIN_GROUP_ID
-const OWNER_ID    = String(process.env.TELEGRAM_OWNER_ID)
+const ADMIN_GROUP         = process.env.TELEGRAM_ADMIN_GROUP_ID
+const ADMIN_THREAD_NOTIFY = Number(process.env.TELEGRAM_ADMIN_THREAD_NOTIFY)
+const ADMIN_THREAD_PANEL  = Number(process.env.TELEGRAM_ADMIN_THREAD_PANEL)
+const OWNER_ID            = String(process.env.TELEGRAM_OWNER_ID)
 
 // ── Guard: hanya owner di admin grup
 function isAdmin(ctx) {
@@ -38,7 +40,10 @@ function adminOnly(handler) {
 
 // ── Notify ke admin grup (dipanggil dari file handler lain)
 async function notify(telegram, text) {
-  await telegram.sendMessage(ADMIN_GROUP, text, { parse_mode: 'MarkdownV2' }).catch(() => {})
+  await telegram.sendMessage(ADMIN_GROUP, text, {
+    parse_mode: 'MarkdownV2',
+    message_thread_id: ADMIN_THREAD_NOTIFY,
+  }).catch(() => {})
 }
 
 // ── /help admin
@@ -48,7 +53,7 @@ async function handleAdminHelp(ctx) {
     `*Database*\n\`/dbstats\`  — statistik database\n\`/listtrack [page]\`  — daftar lagu\n\`/findtrack <keyword>\`  — cari lagu\n\`/deltrack <track\\_id>\`  — hapus lagu\n\n` +
     `*Tambah Koleksi*\nUpload audio langsung atau kirim URL Spotify\n\n` +
     `*Sistem*\n\`/syncr2\`  — upload R2 massal\n\`/syncmeta\`  — sync metadata`,
-    { parse_mode: 'MarkdownV2' }
+    { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
   )
 }
 
@@ -61,7 +66,7 @@ async function handleAddTrack(ctx, url) {
   if (trackId && getTrack(trackId)) {
     return ctx.reply(
       `ℹ️ Track sudah ada di DB:\n*${escape(info.title)}* — ${escape(info.author)}`,
-      { parse_mode: 'MarkdownV2' }
+      { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
     )
   }
 
@@ -72,7 +77,7 @@ async function handleAddTrack(ctx, url) {
   if (existingByMeta) {
     return ctx.reply(
       `ℹ️ Track sudah ada di DB \\(via jalur lain\\):\n*${escape(existingByMeta.title)}* — ${escape(existingByMeta.artist)}\n🆔 \`${existingByMeta.track_id}\``,
-      { parse_mode: 'MarkdownV2' }
+      { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
     )
   }
   const candidates = [download.server_2, download.original, download.server_1].filter(Boolean)
@@ -94,13 +99,13 @@ async function handleAddTrack(ctx, url) {
   if (!buffer) {
     return ctx.reply(
       `❌ Gagal download: _${escape(lastErr?.message)}_`,
-      { parse_mode: 'MarkdownV2' }
+      { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
     )
   }
 
   const waitMsg = await ctx.reply(
     `⏳ Uploading ke Telegram\\.\\.\\. \\(${(fileSize / 1024).toFixed(0)} KB\\)`,
-    { parse_mode: 'MarkdownV2' }
+    { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
   )
   const key      = trackKey(trackId || Date.now().toString(), safeTitle, safeArtist, 'mp3')
   const audioOpts = {
@@ -122,7 +127,7 @@ async function handleAddTrack(ctx, url) {
 
       await ctx.reply(
         `✅ Berhasil ditambahkan:\n*${escape(safeTitle)}* — ${escape(safeArtist)}`,
-        { parse_mode: 'MarkdownV2' }
+        { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
       )
 
       // Background: enrich dulu → saveTrack sekali dengan data lengkap → R2 → sync
@@ -178,7 +183,7 @@ async function handleAddTrack(ctx, url) {
       logger.error({ event: 'addtrack_upload_failed', msg: err.message })
       ctx.reply(
         `❌ Upload ke Telegram gagal: _${escape(err.message)}_`,
-        { parse_mode: 'MarkdownV2' }
+        { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
       ).catch(() => {})
     }
   })()
@@ -213,7 +218,7 @@ function registerAdminHandlers(bot) {
       await handleAddTrack(ctx, url)
     } catch (err) {
       logger.error({ event: 'addtrack_error', msg: err.message })
-      ctx.reply(`❌ ${escape(err.message)}`, { parse_mode: 'MarkdownV2' }).catch(() => {})
+      ctx.reply(`❌ ${escape(err.message)}`, { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }).catch(() => {})
     }
   })
 }

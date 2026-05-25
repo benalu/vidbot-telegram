@@ -12,9 +12,14 @@ const { saveTrack, updateTrackR2, getTrackByHash, findTrackByTitleArtist }      
 const { saveFlacTrack, updateFlacTrackR2, getFlacTrackByHash, findFlacTrackByTitleArtist } = require('../flac/flac.repo')
 const { syncFlacToApi, syncMp3ToApi } = require('../../utils/api-sync')
 
-const ADMIN_GROUP       = process.env.TELEGRAM_ADMIN_GROUP_ID
-const OWNER_ID          = String(process.env.TELEGRAM_OWNER_ID)
-const TG_DOWNLOAD_LIMIT = 20 * 1024 * 1024
+const ADMIN_GROUP        = process.env.TELEGRAM_ADMIN_GROUP_ID
+const OWNER_ID           = String(process.env.TELEGRAM_OWNER_ID)
+const ADMIN_THREAD_PANEL = Number(process.env.TELEGRAM_ADMIN_THREAD_PANEL)
+const TG_DOWNLOAD_LIMIT  = 20 * 1024 * 1024
+
+function panelOpts(extra = {}) {
+  return { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL, ...extra }
+}
 
 function isAdmin(ctx) {
   return String(ctx.chat?.id) === String(ADMIN_GROUP) &&
@@ -52,11 +57,11 @@ async function handleAudioUpload(ctx) {
   if (existingHash) {
     return ctx.reply(
       `ℹ️ File ini sudah ada di database:\n*${escape(existingHash.title)}* — ${escape(existingHash.artist)}\n\`${existingHash.track_id}\``,
-      { parse_mode: 'MarkdownV2' }
+      panelOpts()
     )
   }
 
-  const waitMsg = await ctx.reply('⏳ Memproses audio\\.\\.\\.', { parse_mode: 'MarkdownV2' })
+  const waitMsg = await ctx.reply('⏳ Memproses audio\\.\\.\\.', panelOpts())
 
   try {
     const trackId    = uuidv4()
@@ -145,7 +150,7 @@ async function handleAudioUpload(ctx) {
         `*Format caption yang diterima:*\n` +
         `\`Title \\- Artist\`\n` +
         `\`Title \\| Artist\``,
-        { parse_mode: 'MarkdownV2' }
+        panelOpts()
       )
     }
 
@@ -161,7 +166,7 @@ async function handleAudioUpload(ctx) {
         `*${escape(existingTitleArtist.title)}* — ${escape(existingTitleArtist.artist)}\n` +
         `📁 Source: \`${existingTitleArtist.source || 'unknown'}\`\n` +
         `🆔 \`${existingTitleArtist.track_id}\``,
-        { parse_mode: 'MarkdownV2' }
+        panelOpts()
       )
     }
 
@@ -208,7 +213,7 @@ async function handleAudioUpload(ctx) {
       `🎵 *${escape(title)}* — ${escape(artist)}\n` +
       `📁 ${escape((fileSizeFinal / 1024 / 1024).toFixed(1))} MB\n` +
       `🆔 \`${trackId}\``,
-      { parse_mode: 'MarkdownV2' }
+      panelOpts()
     )
 
     // Upload ke R2 di background
@@ -244,7 +249,7 @@ async function handleAudioUpload(ctx) {
   } catch (err) {
     ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
     logger.error({ event: 'manual_upload_error', msg: err.message })
-    ctx.reply(`❌ Gagal memproses: _${escape(err.message)}_`, { parse_mode: 'MarkdownV2' }).catch(() => {})
+    ctx.reply(`❌ Gagal memproses: _${escape(err.message)}_`, panelOpts()).catch(() => {})
   }
 }
 

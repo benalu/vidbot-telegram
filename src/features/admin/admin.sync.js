@@ -11,11 +11,16 @@ const { listTracksWithoutR2, updateTrackR2, listTracksForMetaSync, updateTrackMe
 const { listFlacTracksWithoutR2, updateFlacTrackR2, listFlacTracksForMetaSync, updateFlacTrackMeta } = require('../flac/flac.repo')
 
 let isSyncing = false
+const ADMIN_THREAD_PANEL = Number(process.env.TELEGRAM_ADMIN_THREAD_PANEL)
+
+function panelOpts(extra = {}) {
+  return { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL, ...extra }
+}
 
 // ── /syncr2 ───────────────────────────────────────────────────────────────────
 async function handleSyncR2(ctx) {
   if (isSyncing) {
-    return ctx.reply('⏳ Sync sedang berjalan\\. Tunggu sampai selesai\\.', { parse_mode: 'MarkdownV2' })
+    return ctx.reply('⏳ Sync sedang berjalan\\. Tunggu sampai selesai\\.', panelOpts())
   }
 
   const mp3Tracks  = listTracksWithoutR2().map(t => ({ ...t, _db: 'mp3' }))
@@ -23,12 +28,12 @@ async function handleSyncR2(ctx) {
   const tracks     = [...mp3Tracks, ...flacTracks]
 
   if (!tracks.length) {
-    return ctx.reply('✅ Semua track sudah ada di R2\\.', { parse_mode: 'MarkdownV2' })
+    return ctx.reply('✅ Semua track sudah ada di R2\\.', panelOpts())
   }
 
   const progressMsg = await ctx.reply(
     `☁️ *Sync R2*\n\n${tracks.length} track belum di R2\\. Memulai sync\\.\\.\\.`,
-    { parse_mode: 'MarkdownV2' }
+    panelOpts()
   )
 
   function renderProgress(current, total, success, failed, currentTrack) {
@@ -49,7 +54,7 @@ async function handleSyncR2(ctx) {
     await ctx.telegram.editMessageText(
       ctx.chat.id, progressMsg.message_id, undefined,
       renderProgress(current, total, success, failed, currentTrack),
-      { parse_mode: 'MarkdownV2' }
+      panelOpts()
     ).catch(() => {})
   }
 
@@ -89,7 +94,7 @@ async function handleSyncR2(ctx) {
       await ctx.reply(
         `☁️ *Sync R2 Selesai*\n\n✅ Berhasil: *${success}*\n❌ Gagal: *${failed}*\n` +
         `${failed > 0 ? '_Jalankan /syncr2 lagi untuk retry yang gagal\\._' : '_Semua track sudah tersimpan di R2\\._'}`,
-        { parse_mode: 'MarkdownV2' }
+        panelOpts()
       )
     } finally {
       isSyncing = false
@@ -97,7 +102,7 @@ async function handleSyncR2(ctx) {
   })().catch(err => {
     isSyncing = false  
     logger.error({ event: 'syncr2_fatal', msg: err.message })
-    ctx.reply('❌ Sync gagal fatal\\.', { parse_mode: 'MarkdownV2' }).catch(() => {})
+    ctx.reply('❌ Sync gagal fatal\\.', panelOpts()).catch(() => {})
   })
 }
 
@@ -108,12 +113,12 @@ async function handleSyncMeta(ctx) {
   const tracks     = [...mp3Tracks, ...flacTracks]
 
   if (!tracks.length) {
-    return ctx.reply('✅ Semua track sudah memiliki metadata lengkap\\.', { parse_mode: 'MarkdownV2' })
+    return ctx.reply('✅ Semua track sudah memiliki metadata lengkap\\.', panelOpts())
   }
 
   const progressMsg = await ctx.reply(
     `🔍 *Sync Metadata*\n\n${tracks.length} track perlu di\\-sync\\. Memulai\\.\\.\\.`,
-    { parse_mode: 'MarkdownV2' }
+    panelOpts()
   )
 
   function renderProgress(current, total, success, failed, skipped, currentTrack) {
@@ -132,7 +137,7 @@ async function handleSyncMeta(ctx) {
     await ctx.telegram.editMessageText(
       ctx.chat.id, progressMsg.message_id, undefined,
       renderProgress(current, total, success, failed, skipped, currentTrack),
-      { parse_mode: 'MarkdownV2' }
+      panelOpts()
     ).catch(() => {})
   }
 
@@ -179,11 +184,11 @@ async function handleSyncMeta(ctx) {
       await ctx.reply(
         `🔍 *Sync Metadata Selesai*\n\n✅ Updated: *${success}*\n⏭ Skipped: *${skipped}*\n❌ Gagal: *${failed}*\n` +
         `${failed > 0 ? '_Jalankan /syncmeta lagi untuk retry\\._' : '_Semua metadata sudah lengkap\\._'}`,
-        { parse_mode: 'MarkdownV2' }
+        panelOpts()
       )
     } catch (err) {
       logger.error({ event: 'syncmeta_fatal', msg: err.message })
-      ctx.reply('❌ Sync metadata gagal fatal\\.', { parse_mode: 'MarkdownV2' }).catch(() => {})
+      ctx.reply('❌ Sync metadata gagal fatal\\.', panelOpts()).catch(() => {})
     }
   })()
 }

@@ -10,7 +10,12 @@ const { getStats, listTracks, searchTracks, deleteTrack, getTrack } = require('.
 const { listFlacTracks, getFlacTrack, deleteFlacTrack, getFlacStats, searchFlacTracks } = require('../flac/flac.repo')
 
 const OWNER_ID = String(process.env.TELEGRAM_OWNER_ID)
-const PAGE_SIZE = 10
+const PAGE_SIZE          = 10
+const ADMIN_THREAD_PANEL = Number(process.env.TELEGRAM_ADMIN_THREAD_PANEL)
+
+function panelOpts(extra = {}) {
+  return { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL, ...extra }
+}
 
 function formatSize(bytes) {
   if (!bytes) return 'N/A'
@@ -62,7 +67,7 @@ async function handleDbStats(ctx) {
     `\`${bar}\` ${r2Pct}%\n` +
     `☁️ ${r2Count} / ${totalTracks} tracks\n\n` +
     `*Top Artists:*\n${topList}`,
-    { parse_mode: 'MarkdownV2' }
+    panelOpts()
   )
 }
 
@@ -113,13 +118,10 @@ async function handleListTrack(ctx) {
   const { text, buttons } = buildTrackListMessage(page)
 
   if (!text) {
-    return ctx.reply('❌ Database kosong\\.', { parse_mode: 'MarkdownV2' })
+    return ctx.reply('❌ Database kosong\\.', panelOpts())
   }
 
-  await ctx.reply(text, {
-    parse_mode: 'MarkdownV2',
-    reply_markup: { inline_keyboard: buttons }
-  })
+  await ctx.reply(text, panelOpts({ reply_markup: { inline_keyboard: buttons } }))
 }
 
 async function handleListTrackPage(ctx) {
@@ -138,10 +140,7 @@ async function handleListTrackPage(ctx) {
     return ctx.answerCbQuery('❌ Halaman tidak ditemukan.', { show_alert: true })
   }
 
-  await ctx.editMessageText(text, {
-    parse_mode: 'MarkdownV2',
-    reply_markup: { inline_keyboard: buttons }
-  }).catch(() => {})
+  await ctx.editMessageText(text, panelOpts({ reply_markup: { inline_keyboard: buttons } })).catch(() => {})
 
   await ctx.answerCbQuery()
 }
@@ -149,14 +148,14 @@ async function handleListTrackPage(ctx) {
 // ── /findtrack <keyword> ──────────────────────────────────────────────────────
 async function handleFindTrack(ctx) {
   const keyword = ctx.message.text.split(/\s+/).slice(1).join(' ').trim()
-  if (!keyword) return ctx.reply('❌ Masukkan keyword\\.', { parse_mode: 'MarkdownV2' })
+  if (!keyword) return ctx.reply('❌ Masukkan keyword\\.', panelOpts())
 
   const mp3Results  = searchTracks(keyword).map(t => ({ ...t, _db: 'mp3' }))
   const flacResults = searchFlacTracks(keyword).map(t => ({ ...t, _db: 'flac' }))
   const results     = [...mp3Results, ...flacResults]
 
   if (!results.length) {
-    return ctx.reply(`❌ Tidak ditemukan: *${escape(keyword)}*`, { parse_mode: 'MarkdownV2' })
+    return ctx.reply(`❌ Tidak ditemukan: *${escape(keyword)}*`, panelOpts())
   }
 
   const lines = results.map((t, i) => {
@@ -170,14 +169,14 @@ async function handleFindTrack(ctx) {
 
   await ctx.reply(
     `*Find:* _${escape(keyword)}_ \\(${results.length} results\\)\n\n${lines}`,
-    { parse_mode: 'MarkdownV2' }
+    panelOpts()
   )
 }
 
 // ── /deltrack <track_id> ──────────────────────────────────────────────────────
 async function handleDelTrack(ctx) {
   const trackId = ctx.message.text.split(/\s+/)[1]
-  if (!trackId) return ctx.reply('❌ Masukkan track\\_id\\.', { parse_mode: 'MarkdownV2' })
+  if (!trackId) return ctx.reply('❌ Masukkan track\\_id\\.', panelOpts())
 
   let track  = getTrack(trackId)
   let isFlac = false
@@ -187,7 +186,7 @@ async function handleDelTrack(ctx) {
     isFlac = true
   }
 
-  if (!track) return ctx.reply(`❌ Track \`${trackId}\` tidak ditemukan\\.`, { parse_mode: 'MarkdownV2' })
+  if (!track) return ctx.reply(`❌ Track \`${trackId}\` tidak ditemukan\\.`, panelOpts())
 
   const deleted = isFlac ? deleteFlacTrack(trackId) : deleteTrack(trackId)
   
@@ -203,10 +202,10 @@ async function handleDelTrack(ctx) {
 
     await ctx.reply(
       `✅ Dihapus dari DB, R2, dan REST API:\n*${escape(track.title)}* — ${escape(track.artist)}`,
-      { parse_mode: 'MarkdownV2' }
+      panelOpts()
     )
   } else {
-      await ctx.reply('❌ Gagal menghapus\\.', { parse_mode: 'MarkdownV2' })
+      await ctx.reply('❌ Gagal menghapus\\.', panelOpts())
     }
   }
 
