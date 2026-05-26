@@ -1,5 +1,6 @@
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3')
 const { Readable } = require('stream')
+const { recordR2Failure } = require('./alerting')
 
 const client = new S3Client({
   region:   'auto',
@@ -14,7 +15,6 @@ const BUCKET     = process.env.R2_BUCKET
 const PUBLIC_URL = process.env.R2_PUBLIC_URL
 
 async function uploadToR2(stream, key, contentType = 'audio/mpeg', contentLength = null) {
-  // Kalau stream, buffer dulu — R2 butuh content-length yang akurat
   let body = stream
   if (stream instanceof Readable || typeof stream.pipe === 'function') {
     const chunks = []
@@ -22,17 +22,21 @@ async function uploadToR2(stream, key, contentType = 'audio/mpeg', contentLength
     body = Buffer.concat(chunks)
   }
 
-  await client.send(new PutObjectCommand({
-    Bucket:        BUCKET,
-    Key:           key,
-    Body:          body,
-    ContentType:   contentType,
-    ContentLength: contentLength || body.length,
-  }))
-
-  return `${PUBLIC_URL}/${key}`
+  try {
+    await client.send(new PutObjectCommand({
+      Bucket:        BUCKET,
+      Key:           key,
+      Body:          body,
+      ContentType:   contentType,
+      ContentLength: contentLength || body.length,
+    }))
+    return `${PUBLIC_URL}/${key}`
+  } catch (err) {
+    const trackName = key.split('/').pop().replace(/\.[^.]+$/, '') || key
+    recordR2Failure(trackName)   
+    throw err                    
+  }
 }
-
 async function deleteFromR2(key) {
   await client.send(new DeleteObjectCommand({
     Bucket: BUCKET,

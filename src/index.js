@@ -19,6 +19,7 @@ const {
   handleDmFlacPage,
 } = require('./features/dm/dm.handler')
 const { setupProcessHandlers } = require('./utils/process')
+const { startAlerting } = require('./utils/alerting')
 
 // ---------------------------------------------------------------------------
 // Env validation at startup — fail fast
@@ -205,5 +206,6 @@ bot.action(/^dm_flac:[^:]+$/, handleDmFlacCallback)
 bot.action(/^dm_flacpage:\d+:.+$/, handleDmFlacPage)
 registerAdminHandlers(bot)
 setupProcessHandlers(bot)
+startAlerting()
 bot.launch()
 logger.info({ status: 'started', commands: ['help', ...Object.keys(COMMANDS)] })
