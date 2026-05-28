@@ -59,3 +59,5 @@ temp/
 test.http
 .cache/
 data/
+SYSTEM_MAP.md
+spider-bot-architecture.md

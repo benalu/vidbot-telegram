@@ -144,6 +144,7 @@ const stmts = {
     LIMIT 1
   `),
   getByHash: db.prepare(`SELECT * FROM tracks WHERE file_hash = ? LIMIT 1`),
+  addSpiderSeed: db.prepare(`INSERT OR IGNORE INTO spider_artists (artist_id, name, status) VALUES (?, ?, 'pending')`),
 }
 
 function getTrack(trackId) {
@@ -226,11 +227,24 @@ function getTrackByHash(hash) {
 function findTrackByTitleArtist(title, artist) {
   return stmts.findByTitleArtist.get(title, artist) || null
 }
+function addSpiderSeed(artistId, name) {
+  // Kita buat tabelnya dulu secara dinamis jika belum ada (berjaga-jaga)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS spider_artists (
+      artist_id TEXT PRIMARY KEY,
+      name TEXT,
+      status TEXT DEFAULT 'pending',
+      added_at INTEGER DEFAULT (strftime('%s', 'now'))
+    )
+  `)
+  const info = stmts.addSpiderSeed.run(artistId, name)
+  return info.changes > 0
+}
 
 module.exports = {
   getTrack, saveTrack, deleteTrack, searchTracks,
   listTracks, countTracks, getStats, updateTrackR2,
   listTracksWithoutR2, listTracksForMetaSync, updateTrackMeta,
   incrementRequestCount, getTopTracks, getRandomTrack,
-  getTrackByHash, findTrackByTitleArtist,
+  getTrackByHash, findTrackByTitleArtist, addSpiderSeed
 }

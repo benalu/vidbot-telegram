@@ -131,21 +131,21 @@ Search and download movies by title\\.
 Add the release year if the title is too common\\.
 `.trim(),
 
-  flac: () => `
-  *FLAC Collection*
+flac: () => `
+*FLAC Collection*
 
-  Cari dan putar lagu FLAC dari koleksi Vidbot\\.
+Cari dan putar lagu FLAC dari koleksi Vidbot\\.
 
-  *Command*
-  \`/flac <judul atau artist>\`
+*Command*
+\`/flac <judul atau artist>\`
 
-  *Contoh*
-  \`/flac Daft Punk\`
-  \`/flac Radiohead OK Computer\`
-  \`/flac The Weeknd\`
+*Contoh*
+\`/flac Daft Punk\`
+\`/flac Radiohead OK Computer\`
+\`/flac The Weeknd\`
 
-  Semakin spesifik keyword, semakin akurat hasilnya\\.
-  `.trim(),
+Semakin spesifik keyword, semakin akurat hasilnya\\.
+`.trim(),
 
   // Aliases — covers both before and after social topic migration
   tiktok:    (...a) => TOPIC_HELP.social(...a),

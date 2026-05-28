@@ -407,8 +407,6 @@ async function handleUrl(ctx, url) {
       `\\[ ERROR \\]\nFailed to process track: _${escape(error.message)}_`,
       replyOpts(ctx)
     )
-  } finally {
-    ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
   }
 }
 
