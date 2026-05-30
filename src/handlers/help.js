@@ -1,14 +1,9 @@
 // src/handlers/help.js
 // Context-aware help — each topic gets its own guide.
-// Falls back to a summary of all topics if /help is used outside a known topic.
 
 const GROUP_TOPICS = require('../config/topics')
 const { escape }   = require('../formats/utils')
 
-// ---------------------------------------------------------------------------
-// Help content per topic
-// Each entry is a function returning a MarkdownV2 string.
-// ---------------------------------------------------------------------------
 const TOPIC_HELP = {
 
   vidhub: () => `
@@ -58,7 +53,7 @@ Search for leaked data from breach databases by email, username, or phone number
 — Results are capped at 50 rows per request
 `.trim(),
 
-spotify: () => `
+  spotify: () => `
 *Spotify Downloader*
 
 Download tracks from Spotify in high quality\\.
@@ -131,7 +126,7 @@ Search and download movies by title\\.
 Add the release year if the title is too common\\.
 `.trim(),
 
-flac: () => `
+  flac: () => `
 *FLAC Collection*
 
 Cari dan putar lagu FLAC dari koleksi Vidbot\\.
@@ -147,17 +142,35 @@ Cari dan putar lagu FLAC dari koleksi Vidbot\\.
 Semakin spesifik keyword, semakin akurat hasilnya\\.
 `.trim(),
 
-  // Aliases — covers both before and after social topic migration
+  ebooks: () => `
+*Ebooks Collection*
+
+Cari dan download ebook dari koleksi Vidbot\\.
+
+*Command*
+\`/ebooks <keyword>\`
+
+*Pencarian berdasarkan:*
+— Judul buku
+— Nama penulis
+— Genre
+
+*Contoh*
+\`/ebooks Atomic Habits\`
+\`/ebooks James Clear\`
+\`/ebooks Self\\-Help\`
+\`/ebooks Fiction\`
+
+Pilih buku dari hasil pencarian untuk download\\.
+`.trim(),
+
+  // Aliases
   tiktok:    (...a) => TOPIC_HELP.social(...a),
   instagram: (...a) => TOPIC_HELP.social(...a),
   twitter:   (...a) => TOPIC_HELP.social(...a),
   threads:   (...a) => TOPIC_HELP.social(...a),
-
 }
 
-// ---------------------------------------------------------------------------
-// Fallback — shown when /help is used outside a recognised topic
-// ---------------------------------------------------------------------------
 function allTopicsHelp() {
   return `
 *VidOpsBot*
@@ -173,13 +186,11 @@ Vidhub      — download from video hosting
 APK         — download Android apps
 Movies      — download films
 FLAC        — download lossless music
+Ebooks      — download ebooks
 \`\`\`
 `.trim()
 }
 
-// ---------------------------------------------------------------------------
-// Handler
-// ---------------------------------------------------------------------------
 async function handleHelp(ctx) {
   const chatId   = String(ctx.chat.id)
   const threadId = String(ctx.message.message_thread_id)
@@ -199,7 +210,5 @@ async function handleHelp(ctx) {
     message_thread_id: ctx.message.message_thread_id
   })
 }
-
-
 
 module.exports = { handleHelp }

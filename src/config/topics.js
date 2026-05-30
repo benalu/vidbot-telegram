@@ -12,6 +12,7 @@ const GROUP_TOPICS = {
     instagram: process.env.TELEGRAM_THREAD_SOCIAL,
     twitter:   process.env.TELEGRAM_THREAD_SOCIAL,
     threads:   process.env.TELEGRAM_THREAD_SOCIAL,
+    ebooks:    process.env.TELEGRAM_THREAD_EBOOKS,
   }
 }
 

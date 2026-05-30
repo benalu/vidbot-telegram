@@ -14,6 +14,7 @@ const { handleMovies }     = require('../handlers/movies')
 const { handleFlacCollection } = require('../features/flac/flac.handler')
 const { handleAppAndroid } = require('../handlers/app')
 const { handleLeakcheck }  = require('../handlers/leakcheck')
+const { handleEbooks }     = require('../features/ebooks/ebooks.handler')
 
 const COMMANDS = {
   leak:    { topic: 'leakcheck', handler: handleLeakcheck,      requiresArg: true },
@@ -26,6 +27,7 @@ const COMMANDS = {
   apk:     { topic: 'apk',       handler: handleAppAndroid,     requiresArg: true },
   movie:   { topic: 'movies',    handler: handleMovies,         requiresArg: true },
   flac:    { topic: 'flac',      handler: handleFlacCollection, requiresArg: false },
+  ebooks:  { topic: 'ebooks',    handler: handleEbooks,         requiresArg: false },
 }
 
 module.exports = COMMANDS
