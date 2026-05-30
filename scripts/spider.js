@@ -45,8 +45,8 @@ const requiredEnv = [
   'TELEGRAM_ADMIN_GROUP_ID', 
   'TELEGRAM_OWNER_ID', 
   'TELEGRAM_ADMIN_THREAD_SPIDER',
-  'TELEGRAM_ADMIN_THREAD_SPIDER_PANEL', // ✨ Diperlukan untuk log operasional
-  'TELEGRAM_ADMIN_THREAD_ALERT'        // ✨ Diperlukan untuk darurat sistem
+  'TELEGRAM_ADMIN_THREAD_SPIDER_PANEL', 
+  'TELEGRAM_ADMIN_THREAD_ALERT'        
 ];
 const missingEnv = requiredEnv.filter(key => !process.env[key]);
 if (missingEnv.length > 0) {
@@ -56,9 +56,14 @@ if (missingEnv.length > 0) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
+const ADMIN_GROUP = process.env.TELEGRAM_ADMIN_GROUP_ID;
+const THREAD_SPIDER = Number(process.env.TELEGRAM_ADMIN_THREAD_SPIDER);
+const THREAD_PANEL = Number(process.env.TELEGRAM_ADMIN_THREAD_SPIDER_PANEL);
+const THREAD_ALERT = Number(process.env.TELEGRAM_ADMIN_THREAD_ALERT);
 
 // Koneksi ke DB yang sama untuk menyimpan queue artis (Dengan proteksi antrean 5 detik)
 const DB_PATH = path.join(__dirname, '../data/spotify/data.db');
+const STATS_PATH = path.join(__dirname, '../data/spotify/spider-stats.json');
 const db = new Database(DB_PATH, { timeout: 5000 });
 db.pragma('journal_mode = WAL');
 db.pragma('busy_timeout = 5000');
@@ -149,6 +154,9 @@ let globalTotalDurationMs = 0;
 let globalTracksAttempted = 0;  
 let globalTracksSuccess = 0;   
 let consecutiveFatalErrors = 0;
+let globalAlbumsScanned = 0;
+let globalTotalSleepMs = 0;
+let globalDeepSleepCount = 0; // ✨ FIX N-3: Menghitung berapa kali bot tertidur
 // ──────────────────────────────────────────────────────────────────────────────
 
 async function runSpider() {
@@ -156,8 +164,14 @@ async function runSpider() {
   const doneCount = stmts.countDone.get().count;
   sysLog('INFO', 'SYSTEM', `=== SPIDER BOT WORKER ONLINE === | Statistik Antrean: ${pendingCount} Pending, ${doneCount} Selesai`);
 
+  const dataDir = path.join(__dirname, '../data/spotify');
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+    sysLog('INFO', 'SYSTEM', `Membuat direktori data baru di ${dataDir}`);
+  }
+
   try {
-    const statsPath = path.join(__dirname, '../data/spotify/spider-stats.json');
+    const statsPath = STATS_PATH;
     let initStats = {};
     if (fs.existsSync(statsPath)) {
       initStats = JSON.parse(fs.readFileSync(statsPath, 'utf8'));
@@ -165,10 +179,19 @@ async function runSpider() {
         initStats.last_shutdown_reason = initStats.shutdown_reason; 
         delete initStats.shutdown_reason;
       }
+      if (initStats.total_deep_sleep_count) {
+        globalDeepSleepCount = initStats.total_deep_sleep_count;
+      }
     }
     initStats.status = 'ONLINE';
     initStats.timestamp = new Date().toISOString();
-    fs.writeFileSync(statsPath, JSON.stringify(initStats, null, 2));
+    const tmpPath = statsPath + '.tmp';
+    try {
+      fs.writeFileSync(tmpPath, JSON.stringify(initStats, null, 2));
+      fs.renameSync(tmpPath, statsPath);
+    } finally {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); // ✨ FIX B-1: Sapu otomatis
+    }
   } catch (e) {}
 
   let token = null;
@@ -180,6 +203,75 @@ async function runSpider() {
   }
   let tokenTime = Date.now();
   let isIdle = false;
+  let shiftStartTime;
+  const MAX_WORK_MS = (Number(process.env.SPIDER_WORK_DURATION_HOURS) || 1) * 60 * 60 * 1000;
+  
+  const rawMinRest = (Number(process.env.SPIDER_REST_MIN_HOURS) || 2) * 60 * 60 * 1000;
+  const rawMaxRest = (Number(process.env.SPIDER_REST_MAX_HOURS) || 3) * 60 * 60 * 1000;
+  if (rawMinRest > rawMaxRest) {
+    sysLog('WARN', 'SYSTEM', `Konfigurasi SPIDER_REST_MIN_HOURS lebih besar dari MAX_HOURS. Nilai ditukar otomatis.`);
+  }
+  
+  const MIN_REST_MS = Math.min(rawMinRest, rawMaxRest);
+  const MAX_REST_MS = Math.max(rawMinRest, rawMaxRest);
+  const RAM_THRESHOLD_MB = Number(process.env.SPIDER_RAM_LIMIT_MB) || 800;
+  const MAX_ARTISTS_SESSION = Number(process.env.SPIDER_MAX_ARTISTS) || 100;
+
+  const DELAY_TRACK_MIN = Number(process.env.SPIDER_DELAY_TRACK_MIN_MS) || 45000;
+  const DELAY_TRACK_MAX = Number(process.env.SPIDER_DELAY_TRACK_MAX_MS) || 90000;
+  const DELAY_ARTIST_MIN = Number(process.env.SPIDER_DELAY_ARTIST_MIN_MS) || 120000;
+  const DELAY_ARTIST_MAX = Number(process.env.SPIDER_DELAY_ARTIST_MAX_MS) || 240000;
+  bot.telegram.sendMessage(
+    ADMIN_GROUP,
+    `🚀 *Spider Bot Online*\nSistem worker berhasil melakukan inisialisasi\\.\n` +
+    `• Antrean: *${pendingCount} Pending*\n` +
+    `• Shift Limit: *${MAX_WORK_MS / 3600000} Jam*\n` +
+    `_Mulai menyisir Spotify API\\.\\.\\._`,
+    { parse_mode: 'MarkdownV2', message_thread_id: THREAD_PANEL }
+  ).catch((err) => sysLog('WARN', 'TG_STARTUP_FAILED', 'Gagal kirim notifikasi startup ke Telegram', { error: err.message })); 
+
+  // Reset waktu shift TEPAT sebelum masuk loop kerja
+  shiftStartTime = Date.now();
+
+  // ✨ FIX N-6 & N-7: Deklarasikan fungsi utilitas di luar loop untuk menghemat RAM
+  const executeWithTimeout = (promise, ms, abortSignal) => {
+    let timer;
+    const timeoutPromise = new Promise((_, rej) => {
+      timer = setTimeout(() => rej(new Error('TIMEOUT_HANG: API eksternal menggantung (Stuck)')), ms);
+    });
+    const abortPromise = new Promise((_, rej) => {
+      if (abortSignal.aborted) return rej(new Error('ABORTED'));
+      abortSignal.addEventListener('abort', () => rej(new Error('ABORTED')), { once: true });
+    });
+    return Promise.race([promise, timeoutPromise, abortPromise])
+      .finally(() => clearTimeout(timer));
+  };
+
+  const baseMockCtx = {
+    isSpider: true, 
+    chat: { id: Number(ADMIN_GROUP) }, 
+    from: { id: Number(process.env.TELEGRAM_OWNER_ID), username: 'spider_bot' },
+    telegram: bot.telegram,
+    sendChatAction: async () => {},
+    reply: (text, opts) => {
+      sysLog('INFO', 'TG_MOCK_REPLY', `Pesan Telegram dikirim`, { msg: text.substring(0, 50).replace(/\n/g, ' ') });
+      return bot.telegram.sendMessage(ADMIN_GROUP, text, {
+        ...opts, message_thread_id: THREAD_PANEL
+      });
+    },
+    replyWithAudio: (audio, opts) => {
+      sysLog('INFO', 'TG_MOCK_UPLOAD', `Mengunggah buffer audio ke Telegram...`);
+      return bot.telegram.sendAudio(ADMIN_GROUP, audio, {
+        ...opts, message_thread_id: THREAD_SPIDER
+      }).then(sent => {
+        sysLog('INFO', 'TG_MOCK_UPLOAD', `Audio berhasil terkirim ke Telegram`, { file_id: sent?.audio?.file_id });
+        return sent;
+      }).catch(err => {
+        sysLog('ERROR', 'TG_MOCK_UPLOAD', `Gagal mengunggah ke Telegram`, { error: err.message });
+        throw err;
+      });
+    }
+  };
 
   while (isRunning) {
     // Auto-refresh token tiap 50 menit
@@ -199,9 +291,9 @@ async function runSpider() {
         if (!isIdle) {
           sysLog('INFO', 'QUEUE', 'Antrean artis telah habis. Spider masuk mode Idle (Tidur 30 detik).');
           bot.telegram.sendMessage(
-            process.env.TELEGRAM_ADMIN_GROUP_ID,
+            ADMIN_GROUP,
             `💤 *Spider Idle*\nAntrean artis telah disapu bersih\\. Bot menunggu data baru\\.\\.\\.`,
-            { parse_mode: 'MarkdownV2', message_thread_id: Number(process.env.TELEGRAM_ADMIN_THREAD_SPIDER_PANEL) } // ✨ PANEL
+            { parse_mode: 'MarkdownV2', message_thread_id: THREAD_PANEL }
           ).catch(() => {});
           isIdle = true;
         }
@@ -212,6 +304,7 @@ async function runSpider() {
     if (isIdle) {
       sysLog('INFO', 'SYSTEM', 'Spider keluar dari mode Idle. Menemukan artis baru di antrean!');
       isIdle = false;
+      shiftStartTime = Date.now();
     }
 
     const sisaAntrean = Math.max(0, stmts.countPending.get().count - 1);
@@ -236,34 +329,6 @@ async function runSpider() {
       let currentAlbumIndex = 0;
       let totalAlbumsInApi = 0;
 
-      // ✨ ROUTING TERPISAH: Text/Log ke PANEL, Media Audio ke SONGS
-      const baseMockCtx = {
-        isSpider: true, 
-        chat: { id: Number(process.env.TELEGRAM_ADMIN_GROUP_ID) },
-        from: { id: Number(process.env.TELEGRAM_OWNER_ID), username: 'spider_bot' },
-        telegram: bot.telegram,
-        sendChatAction: async () => {},
-        reply: (text, opts) => {
-          sysLog('INFO', 'TG_MOCK_REPLY', `Pesan Telegram dikirim`, { msg: text.substring(0, 50).replace(/\n/g, ' ') });
-          return bot.telegram.sendMessage(process.env.TELEGRAM_ADMIN_GROUP_ID, text, {
-            ...opts, message_thread_id: Number(process.env.TELEGRAM_ADMIN_THREAD_SPIDER_PANEL) // ✨ PANEL
-          });
-        },
-        replyWithAudio: (audio, opts) => {
-          sysLog('INFO', 'TG_MOCK_UPLOAD', `Mengunggah buffer audio ke Telegram...`);
-          return bot.telegram.sendAudio(process.env.TELEGRAM_ADMIN_GROUP_ID, audio, {
-            ...opts, message_thread_id: Number(process.env.TELEGRAM_ADMIN_THREAD_SPIDER) // ✨ SONGS
-          }).then(sent => {
-            sysLog('INFO', 'TG_MOCK_UPLOAD', `Audio berhasil terkirim ke Telegram`, { file_id: sent?.audio?.file_id });
-            return sent;
-          }).catch(err => {
-            sysLog('ERROR', 'TG_MOCK_UPLOAD', `Gagal mengunggah ke Telegram`, { error: err.message });
-            throw err;
-          });
-        },
-        message: { message_thread_id: Number(process.env.TELEGRAM_ADMIN_THREAD_SPIDER_PANEL) } // ✨ PANEL Default
-      };
-
       while (fetchAlbums && isRunning) {
         try {
           sysLog('INFO', 'API_SPOTIFY', `Fetching daftar album...`, { offset: albumOffset, limit: albumLimit });
@@ -287,6 +352,7 @@ async function runSpider() {
             if (!isRunning) break;
             
             currentAlbumIndex++;
+            globalAlbumsScanned++;
             sysLog('INFO', 'PROCESS_ALBUM', `Membongkar tracklist album [${currentAlbumIndex}/${totalAlbumsInApi || '?'}]`, { album_name: album.name, type: album.album_type });
             await delay(gaussianRandom(1200, 2500)).catch(() => {});
 
@@ -306,19 +372,6 @@ async function runSpider() {
                    fetchTracks = false;
                    continue;
                  }
-
-                 const executeWithTimeout = (promise, ms, abortSignal) => {
-                   let timer;
-                   const timeoutPromise = new Promise((_, rej) => {
-                     timer = setTimeout(() => rej(new Error('TIMEOUT_HANG: API eksternal menggantung (Stuck)')), ms);
-                   });
-                   const abortPromise = new Promise((_, rej) => {
-                     if (abortSignal.aborted) return rej(new Error('ABORTED'));
-                     abortSignal.addEventListener('abort', () => rej(new Error('ABORTED')), { once: true });
-                   });
-                   return Promise.race([promise, timeoutPromise, abortPromise])
-                     .finally(() => clearTimeout(timer));
-                 };
 
                  for (let i = 0; i < tracks.length; i++) {
                     if (!isRunning) break;
@@ -365,15 +418,21 @@ async function runSpider() {
                     sysLog('INFO', 'DOWNLOAD_INIT', `Mengeksekusi handler pengunduhan`, { index: totalLaguTerproses, track: safeTitle });
                     const spotifyUrl = SPOTIFY_WEB_URL + track.id;
 
-                    baseMockCtx.message.message_id = Date.now() % 100000000;
-                    baseMockCtx.message.text = `/spot ${spotifyUrl}`;
+                    const currentMockCtx = {
+                      ...baseMockCtx,
+                      message: {
+                        message_id: Date.now() % 100000000,
+                        message_thread_id: THREAD_PANEL,
+                        text: `/spot ${spotifyUrl}`
+                      }
+                    };
 
                     let attempt = 0;
                     let success = false;
                     let skipStealthDelay = false;
                     while (attempt <= MAX_RETRY && !success) {
                       try {
-                        await executeWithTimeout(handleAddTrack(baseMockCtx, spotifyUrl), 3 * 60 * 1000, signal);
+                        await executeWithTimeout(handleAddTrack(currentMockCtx, spotifyUrl), 3 * 60 * 1000, signal);
                         success = true;
                         totalLaguBerhasil++;
                         sysLog('INFO', 'DOWNLOAD_SUCCESS', `Handler selesai diproses`, { track: safeTitle });
@@ -387,11 +446,10 @@ async function runSpider() {
                           totalSkipPermanen++;
                           sysLog('WARN', 'DOWNLOAD_ABORTED', `Skip Permanen (Aturan Validasi)`, { track: safeTitle, reason: err.message });
                           
-                          // ✨ NOTIFIKASI KE TELEGRAM (SKIP PERMANEN -> PANEL)
                           bot.telegram.sendMessage(
-                            process.env.TELEGRAM_ADMIN_GROUP_ID,
+                            ADMIN_GROUP,
                             `⚠️ *Skip Permanen*\n🎵 ${escape(safeTitle)} — ${escape(safeArtist)}\n_Alasan: ${escape(err.message)}_`,
-                            { parse_mode: 'MarkdownV2', message_thread_id: Number(process.env.TELEGRAM_ADMIN_THREAD_SPIDER_PANEL) } // ✨ PANEL
+                            { parse_mode: 'MarkdownV2', message_thread_id: THREAD_PANEL }
                           ).catch((err) => {
                             sysLog('ERROR', 'TG_NOTIFY_FAILED', `Gagal mengirim notifikasi Skip/Gagal ke Telegram`, { error: err.message });
                           });
@@ -409,11 +467,10 @@ async function runSpider() {
                           totalGagalTotal++;
                           sysLog('ERROR', 'DOWNLOAD_FATAL', `Semua retry habis. Track dilewati secara paksa`, { track: safeTitle });
                           
-                          // ✨ NOTIFIKASI KE TELEGRAM (GAGAL TOTAL -> PANEL)
                           bot.telegram.sendMessage(
-                            process.env.TELEGRAM_ADMIN_GROUP_ID,
+                            ADMIN_GROUP,
                             `❌ *Gagal Download*\n🎵 ${escape(safeTitle)} — ${escape(safeArtist)}\n_Alasan: Semua retry habis \\(${escape(err.message)}\\)_`,
-                            { parse_mode: 'MarkdownV2', message_thread_id: Number(process.env.TELEGRAM_ADMIN_THREAD_SPIDER_PANEL) } // ✨ PANEL
+                            { parse_mode: 'MarkdownV2', message_thread_id: THREAD_PANEL }
                           ).catch((err) => {
                             sysLog('ERROR', 'TG_NOTIFY_FAILED', `Gagal mengirim notifikasi Skip/Gagal ke Telegram`, { error: err.message });
                           });
@@ -424,9 +481,7 @@ async function runSpider() {
 
                     // Delay antar lagu (STEALTH MODE: 45 - 90 Detik)
                     if (isRunning && !skipStealthDelay) {
-                      const minDelay = 45000;
-                      const maxDelay = 90000;
-                      const waitTime = gaussianRandom(minDelay, maxDelay);
+                      const waitTime = gaussianRandom(DELAY_TRACK_MIN, DELAY_TRACK_MAX);
                       sysLog('INFO', 'STEALTH_DELAY', `Menunggu sebelum memproses track berikutnya...`, { delay_sec: (waitTime / 1000).toFixed(1) });
                       await delay(waitTime).catch(() => {});
                     }
@@ -442,7 +497,7 @@ async function runSpider() {
                   response: err.response?.data,
                   last_track_offset: trackOffset 
                 });
-                if (err.message === 'ABORTED') throw err; // ✨ FIX: Sinyal Abort diteruskan ke atas, tidak tertelan
+                if (err.message === 'ABORTED') throw err; 
                 if (err.response && [401, 429, 500, 502, 503].includes(err.response.status)) {
                   throw err; 
                 }
@@ -461,7 +516,7 @@ async function runSpider() {
             response: err.response?.data,
             last_album_offset: albumOffset
           });
-          if (err.message === 'ABORTED') throw err; // ✨ FIX: Sinyal Abort diteruskan ke atas, tidak tertelan
+          if (err.message === 'ABORTED') throw err; 
           if (err.response && [401, 429, 500, 502, 503].includes(err.response.status)) {
             throw err; 
           }
@@ -487,7 +542,6 @@ async function runSpider() {
       const memRssMB = Math.round(memSnapshot.rss / 1024 / 1024);
       const memHeapMB = Math.round(memSnapshot.heapUsed / 1024 / 1024);
 
-      // ✨ FIX: Sisa antrean di-query dan disimpan di atas sebelum deklarasi duplikat terjadi
       stmts.markDone.run(currentArtist.artist_id);
       const sisaAntreanUpdate = stmts.countPending.get().count;
       const doneCountUpdate = stmts.countDone.get().count;
@@ -499,34 +553,50 @@ async function runSpider() {
       const etaHours = (etaMs / 1000 / 60 / 60).toFixed(1);
       const displayEta = globalArtistsProcessed <= 3 ? escape('Kalkulasi...') : `~${escape(etaHours)} Jam`;
 
+      const shiftElapsedMs = Date.now() - shiftStartTime;
+      const shiftRemainingMs = Math.max(0, MAX_WORK_MS - shiftElapsedMs);
+
+      const successRate = globalTracksAttempted > 0 ? ((globalTracksSuccess / globalTracksAttempted) * 100).toFixed(1) : 0;
       const statsExport = {
         status: 'ONLINE',
+        current_shift_started_at: new Date(shiftStartTime).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' }),
         pending: sisaAntreanUpdate,
         done: doneCountUpdate,
         last_artist_processed: currentArtist.name,
-        last_aborted_artist: null, // Reset state abort karena siklus ini sukses penuh
+        last_aborted_artist: null, 
         last_duration_minutes: parseFloat(durationMin),
         average_duration_ms: Math.floor(avgDurationMs),
+        shift_elapsed_minutes: Math.floor(shiftElapsedMs / 60000),
+        shift_remaining_minutes: Math.floor(shiftRemainingMs / 60000),
         memory_rss_mb: memRssMB,
         memory_heap_mb: memHeapMB,
         total_session_artists: globalArtistsProcessed,
-        total_albums_scanned: currentAlbumIndex,
+        total_session_albums_scanned: globalAlbumsScanned,
+        total_deep_sleep_count: globalDeepSleepCount, 
+        total_sleep_minutes: Math.round(globalTotalSleepMs / 60000),
         total_session_tracks_attempted: globalTracksAttempted,
         total_session_tracks_success: globalTracksSuccess,
+        session_success_rate_percent: parseFloat(successRate),
         estimated_time_remaining_hours: parseFloat(etaHours),
         uptime_hours: parseFloat((process.uptime() / 3600).toFixed(2)),
         timestamp: new Date().toISOString()
       };
       
-      fs.promises.writeFile(path.join(__dirname, '../data/spotify/spider-stats.json'), JSON.stringify(statsExport, null, 2))
-        .catch(err => sysLog('WARN', 'SYSTEM', `Gagal mengekspor spider-stats.json`, { error: err.message }));
+      const tmpPath = STATS_PATH + '.tmp';
+      try {
+        await fs.promises.writeFile(tmpPath, JSON.stringify(statsExport, null, 2));
+        await fs.promises.rename(tmpPath, STATS_PATH);
+      } catch (err) {
+        sysLog('WARN', 'SYSTEM', `Gagal mengekspor spider-stats.json`, { error: err.message });
+      } finally {
+        await fs.promises.unlink(tmpPath).catch(() => {});
+      }
 
-      // ✨ NOTIFIKASI REPORT SELESAI -> PANEL (265)
       await bot.telegram.sendMessage( 
-        process.env.TELEGRAM_ADMIN_GROUP_ID,
+        ADMIN_GROUP,
         `✅ *Spider Report: Selesai*\n\n` +
         `👤 *Artis:* ${escape(currentArtist.name)}\n` +
-        `CD *Album Disisir:* ${currentAlbumIndex}\n` + 
+        `💿 *Album Disisir:* ${currentAlbumIndex}\n` + 
         `🎵 *Lagu Sukses:* ${totalLaguBerhasil} / ${totalLaguTerproses}\n` +
         (totalSkipPermanen > 0 ? `⏭️ *Skip Permanen:* ${totalSkipPermanen}\n` : '') +  
         (totalGagalTotal > 0 ? `❌ *Gagal Total:* ${totalGagalTotal}\n` : '') +       
@@ -535,21 +605,17 @@ async function runSpider() {
         `⏳ *Sisa Antrean:* ${sisaAntreanUpdate}\n` +
         `💾 *RAM:* ${memRssMB} MB\n` +
         `🔮 *Estimasi Selesai:* ${displayEta}`,
-        { parse_mode: 'MarkdownV2', message_thread_id: Number(process.env.TELEGRAM_ADMIN_THREAD_SPIDER_PANEL) } // ✨ PANEL
+        { parse_mode: 'MarkdownV2', message_thread_id: THREAD_PANEL } 
       ).catch((err) => {
         sysLog('ERROR', 'TG_REPORT_FAILED', `Gagal mengirim ringkasan ke Telegram`, { error: err.message });
       });
-
-      const RAM_THRESHOLD_MB = Number(process.env.SPIDER_RAM_LIMIT_MB) || 800;
-      const MAX_ARTISTS_SESSION = Number(process.env.SPIDER_MAX_ARTISTS) || 100;
       
-      // ✨ EMERGENCY NOTIFICATION -> ALERT (74)
       if (memRssMB >= RAM_THRESHOLD_MB) {
         sysLog('WARN', 'SYSTEM_RESTART', `RAM OS melebihi batas aman (${memRssMB}MB >= ${RAM_THRESHOLD_MB}MB). Memicu auto-restart...`);
         await bot.telegram.sendMessage(
-          process.env.TELEGRAM_ADMIN_GROUP_ID, 
+          ADMIN_GROUP, 
           `⚠️ *Spider Auto-Restart*\nRAM mencapai *${memRssMB} MB*\\. Restart preventif diaktifkan untuk mencegah OOM crash dan menjaga stabilitas VPS\\.\n_Sistem akan hidup kembali otomatis via systemd/PM2\\._`, 
-          { parse_mode: 'MarkdownV2', message_thread_id: Number(process.env.TELEGRAM_ADMIN_THREAD_ALERT) } // 🚨 ALERT
+          { parse_mode: 'MarkdownV2', message_thread_id: THREAD_ALERT }
         ).catch(() => {});
         
         isRunning = false;
@@ -557,9 +623,9 @@ async function runSpider() {
       } else if (globalArtistsProcessed >= MAX_ARTISTS_SESSION) {
         sysLog('INFO', 'SYSTEM_RESTART', `Batas ${MAX_ARTISTS_SESSION} artis tercapai. Memicu auto-restart preventif...`);
         await bot.telegram.sendMessage(
-          process.env.TELEGRAM_ADMIN_GROUP_ID, 
+          ADMIN_GROUP, 
           `🔄 *Spider Auto-Restart*\nBatas *${MAX_ARTISTS_SESSION} artis* tercapai dalam satu sesi\\. Melakukan refresh memori & koneksi database\\.\n_Sistem akan hidup kembali otomatis\\._`, 
-          { parse_mode: 'MarkdownV2', message_thread_id: Number(process.env.TELEGRAM_ADMIN_THREAD_ALERT) } // 🚨 ALERT
+          { parse_mode: 'MarkdownV2', message_thread_id: THREAD_ALERT }
         ).catch(() => {});
         
         isRunning = false;
@@ -568,23 +634,109 @@ async function runSpider() {
 
       // Delay perpindahan Artis (SUPER STEALTH: 2 - 4 Menit)
       if (isRunning) {
-        const minDelay = 120000;
-        const maxDelay = 240000;
-        const waitTime = gaussianRandom(minDelay, maxDelay);
-        sysLog('INFO', 'STEALTH_DELAY', `Istirahat panjang sebelum artis berikutnya...`, { delay_min: (waitTime / 1000 / 60).toFixed(1) });
-        await delay(waitTime).catch(() => {});
+        if (Date.now() - shiftStartTime > MAX_WORK_MS) {
+          
+          if (sisaAntreanUpdate === 0) {
+            sysLog('INFO', 'DEEP_SLEEP', `Batas shift tercapai, tetapi antrean kosong. Melewati jadwal tidur...`);
+            shiftStartTime = Date.now(); 
+          } else {
+            const restTimeMs = gaussianRandom(MIN_REST_MS, MAX_REST_MS);
+            const restTimeMin = Math.round(restTimeMs / 60000);
+            const wakeUpTime = new Date(Date.now() + restTimeMs).toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta' });
+            
+            globalDeepSleepCount++; 
+            
+            sysLog('INFO', 'DEEP_SLEEP', `Batas shift kerja tercapai. Spider tidur pulas hingga ${wakeUpTime}...`);
+
+            bot.telegram.sendMessage(
+              ADMIN_GROUP,
+              `🛌 *Spider Deep Sleep*\nBatas shift kerja 1 jam tercapai\\.\nSpider beristirahat selama *${restTimeMin} menit* dan akan bangun pada *${escape(wakeUpTime)}*\\.`,
+              { parse_mode: 'MarkdownV2', message_thread_id: THREAD_PANEL }
+            ).catch(() => {});
+            
+            const currentStatsPath = STATS_PATH;
+            
+            try {
+              const statsRaw = await fs.promises.readFile(currentStatsPath, 'utf8');
+              const stats = JSON.parse(statsRaw);
+              stats.status = 'SLEEPING';
+              stats.sleep_started_at = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+              stats.next_wake_time = wakeUpTime;
+            const tmpPath = currentStatsPath + '.tmp';
+              try {
+                await fs.promises.writeFile(tmpPath, JSON.stringify(stats, null, 2));
+                await fs.promises.rename(tmpPath, currentStatsPath);
+              } finally {
+                await fs.promises.unlink(tmpPath).catch(() => {}); 
+              }
+            } catch (e) {}
+
+            const sleepStartMs = Date.now();
+            try {
+              await delay(restTimeMs);
+              globalTotalSleepMs += (Date.now() - sleepStartMs);
+            } catch (err) {
+              globalTotalSleepMs += (Date.now() - sleepStartMs);
+              if (err.message === 'ABORTED') {
+                sysLog('WARN', 'SYSTEM', 'Deep sleep dibatalkan paksa karena menerima sinyal shutdown (SIGINT/SIGTERM).');
+                
+                bot.telegram.sendMessage(
+                  ADMIN_GROUP,
+                  `🛑 *Spider Deep Sleep Dibatalkan*\nMenerima sinyal shutdown saat sedang tidur pulas\\. Menutup sistem\\.\\.\\.`,
+                  { parse_mode: 'MarkdownV2', message_thread_id: THREAD_PANEL }
+                ).catch(() => {});
+
+                throw err;
+              }
+            }
+
+            if (isRunning) {
+               sysLog('INFO', 'SYSTEM', `Spider bangun dari tidur panjang! Memasuki shift baru...`);
+               bot.telegram.sendMessage(
+                  ADMIN_GROUP,
+                  `☀️ *Spider Bangun*\nSpider kembali bekerja memproses sisa antrean\\!`,
+                  { parse_mode: 'MarkdownV2', message_thread_id: THREAD_PANEL }
+               ).catch(() => {});
+               shiftStartTime = Date.now();
+                try {
+                 const statsRaw = await fs.promises.readFile(currentStatsPath, 'utf8');
+                 const stats = JSON.parse(statsRaw);
+                 stats.status = 'ONLINE';
+                 stats.next_wake_time = null;
+                 stats.sleep_started_at = null;
+                const tmpPath = currentStatsPath + '.tmp';
+                 try {
+                   await fs.promises.writeFile(tmpPath, JSON.stringify(stats, null, 2));
+                   await fs.promises.rename(tmpPath, currentStatsPath);
+                 } finally {
+                   await fs.promises.unlink(tmpPath).catch(() => {});
+                 }
+               } catch (e) {}
+            }
+          }
+        } else {
+          const waitTime = gaussianRandom(DELAY_ARTIST_MIN, DELAY_ARTIST_MAX);
+          sysLog('INFO', 'STEALTH_DELAY', `Istirahat panjang sebelum artis berikutnya...`, { delay_min: (waitTime / 1000 / 60).toFixed(1) });
+          await delay(waitTime).catch(() => {});
+        }
       }
 
     } catch (err) {
       if (err.message === 'ABORTED') {
         sysLog('WARN', 'PROCESS_ABORTED', `Pemrosesan dihentikan paksa (Graceful Shutdown)`, { artist: currentArtist.name });
         try {
-          const statsPath = path.join(__dirname, '../data/spotify/spider-stats.json');
-          if (fs.existsSync(statsPath)) {
-            const statsRaw = fs.readFileSync(statsPath, 'utf8');
+          if (fs.existsSync(STATS_PATH)) {
+            const statsRaw = fs.readFileSync(STATS_PATH, 'utf8');
             const stats = JSON.parse(statsRaw);
             stats.last_aborted_artist = currentArtist.name;
-            fs.writeFileSync(statsPath, JSON.stringify(stats, null, 2));
+            
+            const tmpPath = STATS_PATH + '.tmp';
+            try {
+              fs.writeFileSync(tmpPath, JSON.stringify(stats, null, 2));
+              fs.renameSync(tmpPath, STATS_PATH);
+            } finally {
+              if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+            }
           }
         } catch (e) {}
         break;
@@ -613,9 +765,9 @@ async function runSpider() {
       // 🚨 CRITICAL EMERGENCY SYSTEM FAILURE -> ALERT (74)
       if (consecutiveFatalErrors >= 3) {
          await bot.telegram.sendMessage(
-            process.env.TELEGRAM_ADMIN_GROUP_ID,
+            ADMIN_GROUP,
             `🚨 *Spider Alert: FATAL ERROR Beruntun*\nBot mengalami kegagalan fatal 3x berturut\\-turut\\.\n_Cek log server segera\\!_`,
-            { parse_mode: 'MarkdownV2', message_thread_id: Number(process.env.TELEGRAM_ADMIN_THREAD_ALERT) } // 🚨 ALERT
+            { parse_mode: 'MarkdownV2', message_thread_id: THREAD_ALERT } 
          ).catch(() => {});
          consecutiveFatalErrors = 0;
       }
@@ -625,9 +777,10 @@ async function runSpider() {
   }
 
   const totalSesiMenit = (globalTotalDurationMs / 1000 / 60).toFixed(2);
-  sysLog('INFO', 'SYSTEM', `=== SPIDER BOT OFF LINE === | Total Sesi Ini: ${globalArtistsProcessed} Artis Selesai | Total Waktu Kerja: ${totalSesiMenit} Menit.`);
+  const totalTidurMenit = (globalTotalSleepMs / 1000 / 60).toFixed(2);
+  sysLog('INFO', 'SYSTEM', `=== SPIDER BOT OFF LINE === | Total Sesi: ${globalArtistsProcessed} Artis | Album Disisir: ${globalAlbumsScanned} | Waktu Kerja: ${totalSesiMenit} Mnt | Waktu Tidur: ${totalTidurMenit} Mnt.`);
   try {
-    const statsPath = path.join(__dirname, '../data/spotify/spider-stats.json');
+    const statsPath = STATS_PATH;
     let finalStats = {};
     if (fs.existsSync(statsPath)) {
         finalStats = JSON.parse(fs.readFileSync(statsPath, 'utf8'));
@@ -635,11 +788,20 @@ async function runSpider() {
     finalStats.status = 'OFFLINE';
     finalStats.shutdown_reason = shutdownReason;
     finalStats.total_session_minutes = parseFloat(totalSesiMenit);
+    finalStats.total_sleep_minutes = parseFloat(totalTidurMenit);
+    finalStats.total_session_albums_scanned = globalAlbumsScanned;
+    finalStats.total_deep_sleep_count = globalDeepSleepCount; 
     finalStats.total_session_tracks_attempted = globalTracksAttempted;
     finalStats.total_session_tracks_success = globalTracksSuccess;
     finalStats.timestamp = new Date().toISOString();
     
-    fs.writeFileSync(statsPath, JSON.stringify(finalStats, null, 2));
+  const tmpPath = statsPath + '.tmp';
+    try {
+      fs.writeFileSync(tmpPath, JSON.stringify(finalStats, null, 2));
+      fs.renameSync(tmpPath, statsPath);
+    } finally {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); 
+    }
   } catch (e) {}
 
   try {
@@ -648,7 +810,9 @@ async function runSpider() {
   } catch (err) {
     sysLog('ERROR', 'SYSTEM', 'Gagal menutup koneksi database', { error: err.message });
   }
-  process.exit(0);
+  setTimeout(() => {
+    process.exit(0);
+  }, 1000);
 }
 
 runSpider();

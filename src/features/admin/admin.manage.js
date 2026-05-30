@@ -20,15 +20,26 @@ function panelOpts(extra = {}) {
 function formatSize(bytes) {
   if (!bytes) return 'N/A'
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }
 
 // ── /dbstats ──────────────────────────────────────────────────────────────────
 async function handleDbStats(ctx) {
-  const mp3  = getStats()       // sudah ada
-  const flac = getFlacStats()   // sudah ada di flac.repo, tinggal dipanggil
+  const mp3  = getStats()       
+  const flac = getFlacStats()   
 
   const totalTracks  = mp3.total_tracks  + flac.total_tracks
+  
+  // ✨ Kalkulasi Breakdown Ukuran File
+  const mp3Bytes = mp3.total_size_bytes || 0;
+  const flacBytes = flac.total_size_bytes || 0;
+  const totalSizeBytes = mp3Bytes + flacBytes;
+
+  const mp3SizeStr = formatSize(mp3Bytes);
+  const flacSizeStr = formatSize(flacBytes);
+  const totalSizeStr = formatSize(totalSizeBytes);
+
   const totalArtists = new Set([
     ...mp3.topArtists.map(a => a.artist),
     ...flac.topArtists.map(a => a.artist),
@@ -42,7 +53,9 @@ async function handleDbStats(ctx) {
 
   const lastAdded = Math.max(mp3.last_added || 0, flac.last_added || 0)
   const lastAddedStr = lastAdded
-    ? new Date(lastAdded * 1000).toLocaleString('id-ID')
+    ? new Date(lastAdded * 1000)
+        .toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })
+        .replace(/\./g, ':')
     : 'N/A'
 
   // Gabungkan top artists dari keduanya, sort by total, ambil 5 teratas
@@ -60,7 +73,12 @@ async function handleDbStats(ctx) {
 
   await ctx.reply(
     `📊 *Database Stats*\n\n` +
-    `🎵 Total tracks: *${totalTracks}* \\(${mp3.total_tracks} MP3 \\+ ${flac.total_tracks} FLAC\\)\n` +
+    `🎵 Total tracks: *${totalTracks}*\n` +               // ✨ FIX: Format Total Tracks
+    `    ├ MP3/Spotify: *${mp3.total_tracks}*\n` +        // ✨ Rincian MP3
+    `    └ FLAC: *${flac.total_tracks}*\n` +              // ✨ Rincian FLAC
+    `💾 Total size: *${escape(totalSizeStr)}*\n` + 
+    `    ├ MP3/Spotify: *${escape(mp3SizeStr)}*\n` + 
+    `    └ FLAC: *${escape(flacSizeStr)}*\n` + 
     `🎤 Total artists: *${totalArtists}*\n` +
     `🕐 Last added: *${escape(lastAddedStr)}*\n\n` +
     `*R2 Coverage*\n` +
@@ -73,8 +91,8 @@ async function handleDbStats(ctx) {
 
 // ── /listtrack [page] ─────────────────────────────────────────────────────────
 function buildTrackListMessage(page) {
-  const allMp3  = listTracks(9999, 0).map(t => ({ ...t, _db: 'mp3' }))
-  const allFlac = listFlacTracks(9999, 0).map(t => ({ ...t, _db: 'flac' }))
+  const allMp3  = listTracks(-1, 0).map(t => ({ ...t, _db: 'mp3' }))
+  const allFlac = listFlacTracks(-1, 0).map(t => ({ ...t, _db: 'flac' }))
 
   const all   = [...allMp3, ...allFlac]
     .sort((a, b) => {
@@ -198,7 +216,7 @@ async function handleDelTrack(ctx) {
 
     // Hapus dari REST API (fire and forget — tidak boleh block reply ke admin)
     const deleteFn = isFlac ? deleteFlacFromApi : deleteMp3FromApi
-    deleteFn(trackId)
+    deleteFn(trackId).catch(err => logger.warn({ event: 'api_delete_failed', track_id: trackId, msg: err.message }))
 
     await ctx.reply(
       `✅ Dihapus dari DB, R2, dan REST API:\n*${escape(track.title)}* — ${escape(track.artist)}`,

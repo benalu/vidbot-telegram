@@ -83,6 +83,7 @@ const stmts = {
   stats:  db.prepare(`
     SELECT
       COUNT(*)                                      as total_tracks,
+      SUM(file_size)                                as total_size_bytes,
       COUNT(DISTINCT artist)                        as total_artists,
       MAX(created_at)                               as last_added,
       SUM(CASE WHEN r2_url IS NULL OR r2_url = ''

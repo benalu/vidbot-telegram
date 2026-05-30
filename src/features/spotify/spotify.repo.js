@@ -90,6 +90,7 @@ const stmts = {
     SELECT
       COUNT(*)                                        as total_tracks,
       COUNT(DISTINCT artist)                          as total_artists,
+      SUM(file_size)                                  as total_size_bytes,
       MAX(created_at)                                 as last_added,
       SUM(CASE WHEN r2_url IS NULL OR r2_url = ''
                THEN 1 ELSE 0 END)                    as without_r2
@@ -145,6 +146,9 @@ const stmts = {
   `),
   getByHash: db.prepare(`SELECT * FROM tracks WHERE file_hash = ? LIMIT 1`),
   addSpiderSeed: db.prepare(`INSERT OR IGNORE INTO spider_artists (artist_id, name, status) VALUES (?, ?, 'pending')`),
+  getQueue: db.prepare(`SELECT * FROM spider_artists WHERE status = 'pending' ORDER BY added_at ASC LIMIT ?`),
+  skipArtist: db.prepare(`DELETE FROM spider_artists WHERE status = 'pending' AND (artist_id = ? OR LOWER(name) = LOWER(?))`),
+  countPending: db.prepare(`SELECT COUNT(*) as count FROM spider_artists WHERE status = 'pending'`),
 }
 
 function getTrack(trackId) {
@@ -228,7 +232,6 @@ function findTrackByTitleArtist(title, artist) {
   return stmts.findByTitleArtist.get(title, artist) || null
 }
 function addSpiderSeed(artistId, name) {
-  // Kita buat tabelnya dulu secara dinamis jika belum ada (berjaga-jaga)
   db.exec(`
     CREATE TABLE IF NOT EXISTS spider_artists (
       artist_id TEXT PRIMARY KEY,
@@ -241,10 +244,15 @@ function addSpiderSeed(artistId, name) {
   return info.changes > 0
 }
 
+function getSpiderQueue(limit = 15) { return stmts.getQueue.all(limit) }
+function skipSpiderArtist(keyword) { return stmts.skipArtist.run(keyword, keyword).changes > 0 }
+function countSpiderQueue() { return stmts.countPending.get().count }
+
 module.exports = {
   getTrack, saveTrack, deleteTrack, searchTracks,
   listTracks, countTracks, getStats, updateTrackR2,
   listTracksWithoutR2, listTracksForMetaSync, updateTrackMeta,
   incrementRequestCount, getTopTracks, getRandomTrack,
-  getTrackByHash, findTrackByTitleArtist, addSpiderSeed
+  getTrackByHash, findTrackByTitleArtist, addSpiderSeed,
+  getSpiderQueue, skipSpiderArtist, countSpiderQueue 
 }

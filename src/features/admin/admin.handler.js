@@ -7,6 +7,7 @@ const api = require('../../api/client')
 const axios = require('axios')
 const mm = require('music-metadata')
 const fs = require('fs')
+const path = require('path')
 
 // Import sub-modules admin
 const { handleAudioUpload } = require('./admin.upload')
@@ -16,8 +17,8 @@ const { handleSyncR2, handleSyncMeta } = require('./admin.sync')
 // Import utilitas & repo untuk handleAddTrack (URL download)
 const { uploadToR2, trackKey } = require('../../utils/r2')
 const { startTyping } = require('../../utils/typing')
-const { enrichMetadata } = require('../../utils/spotify')
-const { getTrack, saveTrack, updateTrackR2, findTrackByTitleArtist, addSpiderSeed } = require('../spotify/spotify.repo')
+const { enrichMetadata, getAccessToken } = require('../../utils/spotify')
+const { getTrack, saveTrack, updateTrackR2, findTrackByTitleArtist, addSpiderSeed, getSpiderQueue, skipSpiderArtist, countSpiderQueue } = require('../spotify/spotify.repo')
 
 
 
@@ -26,6 +27,7 @@ const { syncMp3ToApi } = require('../../utils/api-sync')
 const ADMIN_GROUP         = process.env.TELEGRAM_ADMIN_GROUP_ID
 const ADMIN_THREAD_NOTIFY = Number(process.env.TELEGRAM_ADMIN_THREAD_NOTIFY)
 const ADMIN_THREAD_PANEL  = Number(process.env.TELEGRAM_ADMIN_THREAD_PANEL)
+const ADMIN_THREAD_SPIDER_PANEL = Number(process.env.TELEGRAM_ADMIN_THREAD_SPIDER_PANEL) // ✨ Tambahan Thread
 const OWNER_ID            = String(process.env.TELEGRAM_OWNER_ID)
 
 async function parseAudioDuration(buffer) {
@@ -46,6 +48,25 @@ function parseDurationToSeconds(durationStr) {
   }
   const n = parseFloat(durationStr)
   return isNaN(n) ? null : n
+}
+
+// ── Guard untuk membatasi command tertentu hanya di thread Spider Panel
+function spiderPanelOnly(handler) {
+  return async (ctx) => {
+    if (!isAdmin(ctx)) return
+    if (ctx.message && ctx.message.message_thread_id !== ADMIN_THREAD_SPIDER_PANEL) {
+      const msg = await ctx.reply('❌ Command Spider hanya bisa digunakan di thread Spider Panel.', {
+        message_thread_id: ctx.message.message_thread_id
+      })
+      // Hapus otomatis peringatan dan pesan salah kamar dalam 5 detik
+      setTimeout(() => {
+        ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {})
+        ctx.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => {})
+      }, 5000)
+      return
+    }
+    return handler(ctx)
+  }
 }
 
 // ── Guard: hanya owner di admin grup
@@ -76,8 +97,7 @@ async function handleAdminHelp(ctx) {
   await ctx.reply(
     `🛠 *Admin Panel*\n\n` +
     `*Database*\n\`/dbstats\`  — statistik database\n\`/listtrack [page]\`  — daftar lagu\n\`/findtrack <keyword>\`  — cari lagu\n\`/deltrack <track\\_id>\`  — hapus lagu\n\n` +
-    `*Tambah Koleksi*\nUpload audio langsung atau kirim URL Spotify\n\n` +
-    `*Sistem*\n\`/syncr2\`  — upload R2 massal\n\`/syncmeta\`  — sync metadata\n\`/spider_status\` — cek antrean spider`,
+    `*Sistem Spider & R2*\n\`/seed <artis>\` — masukan artis ke antrean spider\n\`/queue\` — lihat antrean spider saat ini\n\`/spider_skip <nama>\` — hapus artis dari antrean\n\`/spider_status\` — cek metrik spider\n\`/syncr2\`  — upload R2 massal\n\`/syncmeta\`  — sync metadata`,
     { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL }
   )
 }
@@ -296,85 +316,187 @@ async function handleAddTrack(ctx, url) {
 async function handleSeedArtist(ctx) {
   const keyword = ctx.message.text.split(/\s+/).slice(1).join(' ').trim()
   if (!keyword) {
-    return ctx.reply('Gunakan format: /seed nama artis\nContoh: /seed Last Child', {
-      message_thread_id: ADMIN_THREAD_PANEL
+    return ctx.reply('Gunakan format: /seed nama artis\nAtau: /seed <URL Spotify Artist>', {
+      message_thread_id: ADMIN_THREAD_SPIDER_PANEL
     })
   }
 
-  const waitMsg = await ctx.reply('Mencari artis di Spotify...', { message_thread_id: ADMIN_THREAD_PANEL })
+  const waitMsg = await ctx.reply('Mencari artis di Spotify...', { message_thread_id: ADMIN_THREAD_SPIDER_PANEL })
   
   try {
-    // PERBAIKAN URL: String dipisah paksa agar tidak disensor oleh sistem
-    const SPOTIFY_AUTH_URL = 'https://' + 'accounts' + '.spotify' + '.com' + '/api/token'
-    const SPOTIFY_API_URL  = 'https://' + 'api' + '.spotify' + '.com' + '/v1'
-    
-    const auth = Buffer.from(`${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`).toString('base64')
-    const tokenRes = await axios.post(SPOTIFY_AUTH_URL, 'grant_type=client_credentials', {
-      headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' }
-    })
-    const token = tokenRes.data.access_token
+    const SPOTIFY_API_URL  = 'https://api.spotify.com/v1'
+    const token = await getAccessToken()
 
-    // Mencari ID artis
-    const res = await axios.get(`${SPOTIFY_API_URL}/search?q=${encodeURIComponent(keyword)}&type=artist&limit=1`, {
-      headers: { 'Authorization': `Bearer ${token}` }
+    const urlMatch = keyword.match(/artist\/([a-zA-Z0-9]{22})/)
+    const exactId = urlMatch ? urlMatch[1] : (keyword.length === 22 && !keyword.includes(' ') ? keyword : null)
+
+    if (exactId) {
+      const res = await axios.get(`${SPOTIFY_API_URL}/artists/${exactId}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+        timeout: 10000 
+      })
+      
+      const artist = res.data
+      const isNew = addSpiderSeed(artist.id, artist.name)
+      const pendingCount = countSpiderQueue() 
+      
+      const statusMsg = isNew 
+        ? `✅ Seed berhasil ditambahkan:\nArtis: ${artist.name}\nID: ${artist.id}\n\nSpider bot akan otomatis memproses artis ini.\n⏳ Sisa antrean saat ini: *${pendingCount} Artis*`
+        : `ℹ️ Seed sudah ada:\nArtis ${artist.name} sudah berada di dalam antrean atau selesai diproses.`
+            
+      return ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, statusMsg)
+    }
+
+    const res = await axios.get(`${SPOTIFY_API_URL}/search?q=${encodeURIComponent(keyword)}&type=artist&limit=5`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+      timeout: 10000 
     })
 
     const artists = res.data.artists.items
     if (artists.length === 0) {
-      // Hapus parse_mode, gunakan teks polos
       return ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, 
-        `Gagal: Artis ${keyword} tidak ditemukan di Spotify.`)
+        `Gagal: Artis "${keyword}" tidak ditemukan di Spotify.`)
     }
     
-    const artist = artists[0]
-    
-    // Masukkan ke SQLite Queue
-    const isNew = addSpiderSeed(artist.id, artist.name)
-    
-    // PERBAIKAN PESAN: Teks polos, sangat jelas, tanpa emotikon
-    const statusMsg = isNew 
-      ? `Seed berhasil ditambahkan:\nArtis: ${artist.name}\nID: ${artist.id}\n\nSpider bot akan otomatis memproses artis ini dalam siklus berikutnya.`
-      : `Seed sudah ada:\nArtis ${artist.name} sudah berada di dalam antrean spider atau sudah selesai diproses.`
-          
-    // Hapus parse_mode
-    await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, statusMsg)
+    if (artists.length === 1) {
+      const artist = artists[0]
+      const isNew = addSpiderSeed(artist.id, artist.name)
+      const pendingCount = countSpiderQueue()
+      
+      const statusMsg = isNew 
+        ? `✅ Seed berhasil ditambahkan:\nArtis: ${artist.name}\nID: ${artist.id}\n\nSpider bot akan otomatis memproses artis ini.\n⏳ Sisa antrean saat ini: *${pendingCount} Artis*`
+        : `ℹ️ Seed sudah ada:\nArtis ${artist.name} sudah berada di dalam antrean atau selesai diproses.`
+      return ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, statusMsg)
+    }
+
+    const ts = Date.now();
+    const inlineKeyboard = artists.map(a => ([
+      { text: a.name, callback_data: `seed_artist:${a.id}:${ts}` }
+    ]))
+
+    await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, 
+      `Ditemukan beberapa hasil untuk "${keyword}". Pilih artis yang tepat:`,
+      { reply_markup: { inline_keyboard: inlineKeyboard } }
+    )
 
   } catch (err) {
     logger.error({ event: 'seed_artist_failed', msg: err.message }) 
-    // Hapus parse_mode
     ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, 
-      `Gagal menambahkan seed: ${err.message}`)
+      `Gagal mencari artis: ${err.message}`)
+  }
+}
+
+// ── Handler untuk klik tombol artis 
+async function handleSeedArtistCallback(ctx) {
+  const artistId = ctx.match[1]
+  const timestamp = parseInt(ctx.match[2], 10)
+
+  if (Date.now() - timestamp > 60 * 60 * 1000) {
+    return ctx.answerCbQuery('❌ Tombol sudah kedaluwarsa. Silakan cari ulang.', { show_alert: true })
+  }
+  
+  await ctx.answerCbQuery('Memproses artis...').catch(() => {})
+
+  try {
+    const SPOTIFY_API_URL = 'https://api.spotify.com/v1'
+    const token = await getAccessToken()
+    
+    const res = await axios.get(`${SPOTIFY_API_URL}/artists/${artistId}`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+      timeout: 10000
+    })
+
+    const artist = res.data
+    const isNew = addSpiderSeed(artist.id, artist.name)
+    const pendingCount = countSpiderQueue()
+
+    const statusMsg = isNew 
+        ? `✅ Seed berhasil ditambahkan:\nArtis: ${artist.name}\nID: ${artist.id}\n\nSpider bot akan otomatis memproses artis ini.\n⏳ Sisa antrean saat ini: *${pendingCount} Artis*`
+        : `ℹ️ Seed sudah ada:\nArtis ${artist.name} sudah berada di dalam antrean atau selesai diproses.`
+
+    await ctx.editMessageText(statusMsg)
+
+  } catch (err) {
+    logger.error({ event: 'seed_artist_callback_failed', msg: err.message })
+    await ctx.editMessageText(`Gagal memproses artis pilihan: ${err.message}`).catch(() => {})
   }
 }
 
 // ── /spider_status
 async function handleSpiderStatus(ctx) {
   try {
-    // Navigasi mundur 3 folder: src/features/admin -> src/features -> src -> root -> data/spotify
     const statsPath = path.join(__dirname, '../../../data/spotify/spider-stats.json')
     
     if (!fs.existsSync(statsPath)) {
-      return ctx.reply('⚠️ Data statistik Spider belum tersedia. Mungkin Spider belum selesai memproses artis pertamanya.', { message_thread_id: ADMIN_THREAD_PANEL })
+      return ctx.reply('⚠️ Data statistik Spider belum tersedia. Mungkin Spider belum selesai memproses artis pertamanya.', { message_thread_id: ADMIN_THREAD_SPIDER_PANEL })
     }
 
-    const statsRaw = fs.readFileSync(statsPath, 'utf8')
+    const statsRaw = await fs.promises.readFile(statsPath, 'utf8')
     const stats = JSON.parse(statsRaw)
     
-    // Format tanggal update terakhir
     const lastUpdate = new Date(stats.timestamp).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })
+    const statusIcon = stats.status === 'ONLINE' ? '🟢' : (stats.status === 'SLEEPING' ? '🛌' : '🔴')
+    const shiftTotal = (stats.shift_elapsed_minutes || 0) + (stats.shift_remaining_minutes || 0);
+    const shiftDisplay = stats.status === 'SLEEPING'
+      ? `⏸️ *Shift:* Menunggu jadwal bangun\\.\\.\\.\n`
+      : `📅 *Mulai Shift:* ${stats.current_shift_started_at ? escape(stats.current_shift_started_at) : '\\-'}\n` +
+        `⏱️ *Shift Berjalan:* ${stats.shift_elapsed_minutes || 0} / ${shiftTotal} Menit\n`;
 
     const message = `🕸️ *SPIDER BOT STATUS* 🕸️\n\n` +
-      `👤 *Artis Terakhir:* ${stats.last_artist_processed}\n` +
-      `✅ *Total Selesai (DB):* ${stats.done}\n` +
+      `${statusIcon} *Status:* ${escape(stats.status)}\n` +
+      (stats.status === 'SLEEPING' && stats.sleep_started_at ? `💤 *Tidur Sejak:* ${escape(stats.sleep_started_at)}\n` : '') +
+      (stats.next_wake_time ? `⏰ *Bangun Pada:* ${escape(stats.next_wake_time)}\n` : '') +
+      `👤 *Artis Terakhir:* ${escape(stats.last_artist_processed || '-')}\n` +
+      `✅ *Total Selesai \\(DB\\):* ${stats.done}\n` +
       `⏳ *Sisa Antrean:* ${stats.pending}\n` +
-      `⏱️ *Durasi Terakhir:* ${stats.last_duration_minutes} Menit\n` +
-      `🔮 *ETA Selesai:* ~${stats.estimated_time_remaining_hours} Jam\n\n` +
-      `_🔄 Diperbarui: ${lastUpdate}_`
+      shiftDisplay +
+      `⏱️ *Durasi Terakhir:* ${escape(String(stats.last_duration_minutes || 0))} Menit\n` +
+      `🔮 *ETA Selesai:* \\~${escape(String(stats.estimated_time_remaining_hours || 0))} Jam\n\n` + // ✨ FIX: Tambah \\ pada tanda ~
+      `*🖥️ Metrik Sesi Saat Ini:*\n` +
+      `• Uptime Spider: ${escape(String(stats.uptime_hours || 0))} Jam\n` +
+      `• Siklus Tidur: ${stats.total_deep_sleep_count || 0} Kali \\(${stats.total_sleep_minutes || 0} Menit\\)\n` +
+      `• RAM \\(RSS\\): ${stats.memory_rss_mb || 0} MB\n` +
+      `• Album Disisir: ${stats.total_albums_scanned || 0}\n` +
+      `• Lagu Sukses Sesi Ini: ${stats.total_session_tracks_success || 0}\n\n` +
+      (stats.last_shutdown_reason ? `🛑 *Alasan Mati Terakhir:*\n_${escape(stats.last_shutdown_reason)}_\n\n` : '') +
+      `_🔄 Diperbarui: ${escape(lastUpdate)}_`
 
-    return ctx.reply(message, { parse_mode: 'Markdown', message_thread_id: ADMIN_THREAD_PANEL })
+    return ctx.reply(message, { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_SPIDER_PANEL })
   } catch (err) {
     logger.error({ event: 'spider_status_failed', msg: err.message })
-    return ctx.reply(`❌ Terjadi kesalahan saat membaca status Spider: ${err.message}`, { message_thread_id: ADMIN_THREAD_PANEL })
+    return ctx.reply(`❌ Terjadi kesalahan saat membaca status Spider: ${err.message}`, { message_thread_id: ADMIN_THREAD_SPIDER_PANEL })
+  }
+}
+
+// ── /queue 
+async function handleSpiderQueue(ctx) {
+  const pendingCount = countSpiderQueue()
+  if (pendingCount === 0) {
+    return ctx.reply('📭 Antrean Spider kosong saat ini.', { message_thread_id: ADMIN_THREAD_SPIDER_PANEL })
+  }
+
+  const queue = getSpiderQueue(15)
+  const lines = queue.map((a, i) => `${i + 1}\\. *${escape(a.name)}* \\(\`${a.artist_id}\`\\)`).join('\n')
+
+  await ctx.reply(
+    `🕸️ *Spider Queue* \\(${pendingCount} Pending\\)\n_Menampilkan 15 antrean teratas:_\n\n${lines}`, 
+    { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_SPIDER_PANEL }
+  )
+}
+
+// ── /spider_skip 
+async function handleSpiderSkip(ctx) {
+  const keyword = ctx.message.text.split(/\s+/).slice(1).join(' ').trim()
+  if (!keyword) {
+    return ctx.reply('❌ Masukkan nama artis atau ID untuk di-skip.\nContoh: `/spider_skip Nirvana`', { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_SPIDER_PANEL })
+  }
+
+  const success = skipSpiderArtist(keyword)
+  if (success) {
+    const pendingCount = countSpiderQueue()
+    ctx.reply(`✅ Berhasil menghapus/melewati *${escape(keyword)}* dari antrean.\n⏳ Sisa antrean: ${pendingCount}`, { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_SPIDER_PANEL })
+  } else {
+    ctx.reply(`❌ Artis *${escape(keyword)}* tidak ditemukan di antrean (atau sedang/sudah diproses).`, { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_SPIDER_PANEL })
   }
 }
 
@@ -388,8 +510,11 @@ function registerAdminHandlers(bot) {
   bot.command('deltrack',   adminOnly(handleDelTrack))
   bot.command('syncr2',     adminOnly(handleSyncR2))
   bot.command('syncmeta',   adminOnly(handleSyncMeta))
-  bot.command('seed', adminOnly(handleSeedArtist))
-  bot.command('spider_status', adminOnly(handleSpiderStatus))
+  bot.command('seed', spiderPanelOnly(handleSeedArtist))
+  bot.command('queue', spiderPanelOnly(handleSpiderQueue))
+  bot.command('spider_skip', spiderPanelOnly(handleSpiderSkip))
+  bot.command('spider_status', spiderPanelOnly(handleSpiderStatus))
+  bot.action(/^seed_artist:([a-zA-Z0-9]{22}):(\d+)$/, adminOnly(handleSeedArtistCallback))
   
   // Guard untuk manual upload sudah ada di dalam admin.upload.js
   bot.on('audio',    handleAudioUpload)
