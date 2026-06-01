@@ -60,6 +60,7 @@ const ADMIN_GROUP = process.env.TELEGRAM_ADMIN_GROUP_ID;
 const THREAD_SPIDER = Number(process.env.TELEGRAM_ADMIN_THREAD_SPIDER);
 const THREAD_PANEL = Number(process.env.TELEGRAM_ADMIN_THREAD_SPIDER_PANEL);
 const THREAD_ALERT = Number(process.env.TELEGRAM_ADMIN_THREAD_ALERT);
+const ARCHIVE_CHANNEL = process.env.TELEGRAM_ARCHIVE_CHANNEL_ID;
 
 // Koneksi ke DB yang sama untuk menyimpan queue artis (Dengan proteksi antrean 5 detik)
 const DB_PATH = path.join(__dirname, '../data/spotify/data.db');
@@ -256,18 +257,22 @@ async function runSpider() {
     reply: (text, opts) => {
       sysLog('INFO', 'TG_MOCK_REPLY', `Pesan Telegram dikirim`, { msg: text.substring(0, 50).replace(/\n/g, ' ') });
       return bot.telegram.sendMessage(ADMIN_GROUP, text, {
-        ...opts, message_thread_id: THREAD_PANEL
+        ...opts, message_thread_id: THREAD_SPIDER
       });
     },
     replyWithAudio: (audio, opts) => {
-      sysLog('INFO', 'TG_MOCK_UPLOAD', `Mengunggah buffer audio ke Telegram...`);
-      return bot.telegram.sendAudio(ADMIN_GROUP, audio, {
-        ...opts, message_thread_id: THREAD_SPIDER
-      }).then(sent => {
-        sysLog('INFO', 'TG_MOCK_UPLOAD', `Audio berhasil terkirim ke Telegram`, { file_id: sent?.audio?.file_id });
+      sysLog('INFO', 'TG_MOCK_UPLOAD', `Mengunggah buffer audio ke Telegram Archive...`);
+      
+      // Salin opsi dan hapus message_thread_id karena Channel tidak menggunakan sistem Thread (Topik)
+      const cleanOpts = { ...opts };
+      delete cleanOpts.message_thread_id; 
+
+      // Lempar audio ke Archive Channel
+      return bot.telegram.sendAudio(ARCHIVE_CHANNEL, audio, cleanOpts).then(sent => {
+        sysLog('INFO', 'TG_MOCK_UPLOAD', `Audio berhasil terkirim ke Telegram Archive`, { file_id: sent?.audio?.file_id });
         return sent;
       }).catch(err => {
-        sysLog('ERROR', 'TG_MOCK_UPLOAD', `Gagal mengunggah ke Telegram`, { error: err.message });
+        sysLog('ERROR', 'TG_MOCK_UPLOAD', `Gagal mengunggah ke Telegram Archive`, { error: err.message });
         throw err;
       });
     }
@@ -422,7 +427,7 @@ async function runSpider() {
                       ...baseMockCtx,
                       message: {
                         message_id: Date.now() % 100000000,
-                        message_thread_id: THREAD_PANEL,
+                        message_thread_id: THREAD_SPIDER,
                         text: `/spot ${spotifyUrl}`
                       }
                     };
@@ -449,7 +454,7 @@ async function runSpider() {
                           bot.telegram.sendMessage(
                             ADMIN_GROUP,
                             `⚠️ *Skip Permanen*\n🎵 ${escape(safeTitle)} — ${escape(safeArtist)}\n_Alasan: ${escape(err.message)}_`,
-                            { parse_mode: 'MarkdownV2', message_thread_id: THREAD_PANEL }
+                            { parse_mode: 'MarkdownV2', message_thread_id: THREAD_SPIDER }
                           ).catch((err) => {
                             sysLog('ERROR', 'TG_NOTIFY_FAILED', `Gagal mengirim notifikasi Skip/Gagal ke Telegram`, { error: err.message });
                           });
@@ -470,7 +475,7 @@ async function runSpider() {
                           bot.telegram.sendMessage(
                             ADMIN_GROUP,
                             `❌ *Gagal Download*\n🎵 ${escape(safeTitle)} — ${escape(safeArtist)}\n_Alasan: Semua retry habis \\(${escape(err.message)}\\)_`,
-                            { parse_mode: 'MarkdownV2', message_thread_id: THREAD_PANEL }
+                            { parse_mode: 'MarkdownV2', message_thread_id: THREAD_SPIDER }
                           ).catch((err) => {
                             sysLog('ERROR', 'TG_NOTIFY_FAILED', `Gagal mengirim notifikasi Skip/Gagal ke Telegram`, { error: err.message });
                           });

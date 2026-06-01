@@ -18,7 +18,7 @@ const { handleSyncR2, handleSyncMeta } = require('./admin.sync')
 const { uploadToR2, trackKey } = require('../../utils/r2')
 const { startTyping } = require('../../utils/typing')
 const { enrichMetadata, getAccessToken } = require('../../utils/spotify')
-const { getTrack, saveTrack, updateTrackR2, findTrackByTitleArtist, addSpiderSeed, getSpiderQueue, skipSpiderArtist, countSpiderQueue } = require('../spotify/spotify.repo')
+const { getTrack, saveTrack, updateTrackR2, findTrackByTitleArtist, addSpiderSeed, getSpiderQueue, skipSpiderArtist, countSpiderQueue, clearSpiderQueue } = require('../spotify/spotify.repo')
 
 
 
@@ -488,15 +488,32 @@ async function handleSpiderQueue(ctx) {
 async function handleSpiderSkip(ctx) {
   const keyword = ctx.message.text.split(/\s+/).slice(1).join(' ').trim()
   if (!keyword) {
-    return ctx.reply('❌ Masukkan nama artis atau ID untuk di-skip.\nContoh: `/spider_skip Nirvana`', { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_SPIDER_PANEL })
+    // Escape pada titik dan tanda hubung (-)
+    return await ctx.reply('❌ Masukkan nama artis atau ID untuk di\\-skip\\.\nContoh: `/spider_skip Nirvana`', { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_SPIDER_PANEL })
   }
 
   const success = skipSpiderArtist(keyword)
   if (success) {
     const pendingCount = countSpiderQueue()
-    ctx.reply(`✅ Berhasil menghapus/melewati *${escape(keyword)}* dari antrean.\n⏳ Sisa antrean: ${pendingCount}`, { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_SPIDER_PANEL })
+    // Escape pada titik setelah antrean
+    return await ctx.reply(`✅ Berhasil menghapus *${escape(keyword)}* dari antrean\\.\n⏳ Sisa antrean: ${pendingCount}`, { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_SPIDER_PANEL })
   } else {
-    ctx.reply(`❌ Artis *${escape(keyword)}* tidak ditemukan di antrean (atau sedang/sudah diproses).`, { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_SPIDER_PANEL })
+    // Escape pada titik di akhir kalimat
+    return await ctx.reply(`❌ Artis *${escape(keyword)}* tidak ditemukan di antrean\\.`, { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_SPIDER_PANEL })
+  }
+}
+
+// ── /spider_clear
+async function handleSpiderClear(ctx) {
+  try {
+    const deletedCount = clearSpiderQueue()
+    return await ctx.reply(
+      `🧹 *Antrean Dikosongkan*\nBerhasil menghapus ${deletedCount} artis dari antrean Spider\\.`, 
+      { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_SPIDER_PANEL }
+    )
+  } catch (err) {
+    logger.error({ event: 'spider_clear_failed', msg: err.message })
+    return await ctx.reply(`❌ Gagal membersihkan antrean: ${escape(err.message)}`, { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_SPIDER_PANEL })
   }
 }
 
@@ -514,6 +531,7 @@ function registerAdminHandlers(bot) {
   bot.command('queue', spiderPanelOnly(handleSpiderQueue))
   bot.command('spider_skip', spiderPanelOnly(handleSpiderSkip))
   bot.command('spider_status', spiderPanelOnly(handleSpiderStatus))
+  bot.command('spider_clear', spiderPanelOnly(handleSpiderClear))
   bot.action(/^seed_artist:([a-zA-Z0-9]{22}):(\d+)$/, adminOnly(handleSeedArtistCallback))
   
   // Guard untuk manual upload sudah ada di dalam admin.upload.js

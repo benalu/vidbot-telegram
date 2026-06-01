@@ -149,6 +149,7 @@ const stmts = {
   getQueue: db.prepare(`SELECT * FROM spider_artists WHERE status = 'pending' ORDER BY added_at ASC LIMIT ?`),
   skipArtist: db.prepare(`DELETE FROM spider_artists WHERE status = 'pending' AND (artist_id = ? OR LOWER(name) = LOWER(?))`),
   countPending: db.prepare(`SELECT COUNT(*) as count FROM spider_artists WHERE status = 'pending'`),
+  clearSpiderQueue: db.prepare(`DELETE FROM spider_artists WHERE status = 'pending'`),
 }
 
 function getTrack(trackId) {
@@ -247,6 +248,9 @@ function addSpiderSeed(artistId, name) {
 function getSpiderQueue(limit = 15) { return stmts.getQueue.all(limit) }
 function skipSpiderArtist(keyword) { return stmts.skipArtist.run(keyword, keyword).changes > 0 }
 function countSpiderQueue() { return stmts.countPending.get().count }
+function clearSpiderQueue() { 
+  return stmts.clearSpiderQueue.run().changes 
+}
 
 module.exports = {
   getTrack, saveTrack, deleteTrack, searchTracks,
@@ -254,5 +258,5 @@ module.exports = {
   listTracksWithoutR2, listTracksForMetaSync, updateTrackMeta,
   incrementRequestCount, getTopTracks, getRandomTrack,
   getTrackByHash, findTrackByTitleArtist, addSpiderSeed,
-  getSpiderQueue, skipSpiderArtist, countSpiderQueue 
+  getSpiderQueue, skipSpiderArtist, countSpiderQueue, clearSpiderQueue 
 }

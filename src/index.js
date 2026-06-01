@@ -151,7 +151,11 @@ function createHandler(commandName, { topic, handler, requiresArg }) {
 // ---------------------------------------------------------------------------
 // Register commands
 // ---------------------------------------------------------------------------
-const bot = new Telegraf(process.env.TELEGRAM_TOKEN)
+const bot = new Telegraf(process.env.TELEGRAM_TOKEN, {
+  telegram: {
+    apiRoot: 'http://127.0.0.1:8081'
+  }
+})
 
 bot.use((ctx, next) => {
   const type   = ctx.chat?.type

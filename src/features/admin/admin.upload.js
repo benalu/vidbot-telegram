@@ -1,5 +1,7 @@
 // src/features/admin/admin.upload.js
 
+const fs                 = require('fs')
+const path               = require('path')
 const axios              = require('axios')
 const mm                 = require('music-metadata')
 const { v4: uuidv4 }     = require('uuid')
@@ -15,7 +17,9 @@ const { syncFlacToApi, syncMp3ToApi } = require('../../utils/api-sync')
 const ADMIN_GROUP        = process.env.TELEGRAM_ADMIN_GROUP_ID
 const OWNER_ID           = String(process.env.TELEGRAM_OWNER_ID)
 const ADMIN_THREAD_PANEL = Number(process.env.TELEGRAM_ADMIN_THREAD_PANEL)
-const TG_DOWNLOAD_LIMIT  = 20 * 1024 * 1024
+
+// ✨ Limit dinaikkan jadi 2GB
+const TG_DOWNLOAD_LIMIT  = 2000 * 1024 * 1024
 
 function panelOpts(extra = {}) {
   return { parse_mode: 'MarkdownV2', message_thread_id: ADMIN_THREAD_PANEL, ...extra }
@@ -47,7 +51,6 @@ async function handleAudioUpload(ctx) {
   const fileSize = audio.file_size || 0
   const isFlac   = mime.includes('flac')
 
-  // Cek duplikat via file hash sebelum proses apapun
   const fileHash = crypto
     .createHash('sha256')
     .update(`${audio.file_id}:${fileSize}`)
@@ -73,13 +76,24 @@ async function handleAudioUpload(ctx) {
     let thumbnailUrl = null
     let genreMeta    = null
 
-    // Baca ID3 tag dari buffer
-    if (fileSize <= TG_DOWNLOAD_LIMIT) {
+    let localFilePath = null; // ✨ Penampung path file di harddisk VPS
+
+    try {
+      // ✨ Ambil informasi path absolut dari Local API Server
+      const fileData = await ctx.telegram.getFile(audio.file_id)
+      
+      if (fileData.file_path) {
+         // Konversi path Docker (/var/lib/...) menjadi path VPS (/home/ubuntu/...)
+         localFilePath = fileData.file_path.replace('/var/lib/telegram-bot-api', '/home/ubuntu/telegram-api-server/data')
+      }
+    } catch (err) {
+      logger.warn({ event: 'get_file_path_failed', msg: err.message })
+    }
+
+    if (fileSize <= TG_DOWNLOAD_LIMIT && localFilePath && fs.existsSync(localFilePath)) {
       try {
-        const fileLink = await ctx.telegram.getFileLink(audio.file_id)
-        const res      = await axios.get(fileLink.href, { responseType: 'arraybuffer', timeout: 60_000 })
-        const buffer   = Buffer.from(res.data)
-        const meta     = await mm.parseBuffer(buffer, { mimeType: mime })
+        // ✨ Baca metadata langsung dari harddisk VPS (Super Cepat & Hemat RAM!)
+        const meta = await mm.parseFile(localFilePath, { duration: true })
 
         logger.info({
           event: 'metadata_raw',
@@ -88,9 +102,7 @@ async function handleAudioUpload(ctx) {
             artist: meta.common?.artist,
             album:  meta.common?.album,
             year:   meta.common?.year,
-            date:   meta.common?.date,
-          },
-          native_keys: Object.keys(meta.native || {}),
+          }
         })
 
         title     = meta.common?.title  || null
@@ -110,11 +122,7 @@ async function handleAudioUpload(ctx) {
           const coverBuffer = Buffer.from(cover.data)
           const coverMime   = cover.format || 'image/jpeg'
           const coverExt    = coverMime.includes('png') ? 'png' : 'jpg'
-          thumbnailUrl = await uploadToR2(coverBuffer, `covers/${trackId}.${coverExt}`, coverMime, coverBuffer.length)
-            .catch(err => {
-              logger.warn({ event: 'manual_upload_cover_failed', msg: err.message })
-              return null
-            })
+          thumbnailUrl = await uploadToR2(coverBuffer, `covers/${trackId}.${coverExt}`, coverMime, coverBuffer.length).catch(() => null)
         }
       } catch (err) {
         logger.warn({ event: 'metadata_parse_failed', msg: err.message })
@@ -123,13 +131,11 @@ async function handleAudioUpload(ctx) {
       logger.info({ event: 'metadata_skipped_large_file', size: fileSize, track: audio.title })
     }
 
-    // Fallback duration dari Telegram object
     if (!durationMeta && audio.duration) {
       const secs   = Math.round(audio.duration)
       durationMeta = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`
     }
 
-    // Fallback title/artist dari Telegram object lalu caption
     if (!title)  title  = audio.title     || null
     if (!artist) artist = audio.performer || null
 
@@ -141,7 +147,6 @@ async function handleAudioUpload(ctx) {
       }
     }
 
-    // Validasi — harus ada title dan artist sebelum lanjut
     if (!title || !artist) {
       ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
       return ctx.reply(
@@ -154,7 +159,6 @@ async function handleAudioUpload(ctx) {
       )
     }
 
-    // Cek duplikat via title+artist — tangkap entry dari jalur berbeda (misal Spotify URL)
     const existingTitleArtist = isFlac
       ? findFlacTrackByTitleArtist(title, artist)
       : findTrackByTitleArtist(title, artist)
@@ -170,13 +174,12 @@ async function handleAudioUpload(ctx) {
       )
     }
 
-    // Enrich metadata via Spotify + LastFM — hanya jalan kalau bukan duplikat
     try {
       const enriched = await enrichMetadata(title, artist)
-      if (enriched.album)     { albumMeta    = enriched.album;     logger.info({ event: 'spotify_enrich_album',     track: title, album: albumMeta }) }
-      if (enriched.year)      { yearMeta     = enriched.year;      logger.info({ event: 'spotify_enrich_year',      track: title, year: yearMeta }) }
-      if (enriched.thumbnail) { thumbnailUrl = enriched.thumbnail; logger.info({ event: 'spotify_enrich_thumbnail', track: title }) }
-      if (enriched.genre)     { genreMeta    = enriched.genre;     logger.info({ event: 'spotify_enrich_genre',     track: title, genre: genreMeta }) }
+      if (enriched.album)     { albumMeta    = enriched.album }
+      if (enriched.year)      { yearMeta     = enriched.year  }
+      if (enriched.thumbnail) { thumbnailUrl = enriched.thumbnail }
+      if (enriched.genre)     { genreMeta    = enriched.genre }
     } catch (err) {
       logger.warn({ event: 'spotify_enrich_failed', track: title, msg: err.message })
     }
@@ -216,35 +219,51 @@ async function handleAudioUpload(ctx) {
       panelOpts()
     )
 
-    // Upload ke R2 di background
+    // ✨ UPDATE: Upload R2 langsung dari Harddisk VPS (Tanpa Axios!)
     ;(async () => {
-    if (fileSizeFinal > TG_DOWNLOAD_LIMIT) {
-      logger.info({ event: 'manual_upload_r2_skipped', reason: 'file_too_large_for_bot_api', track: title, size: fileSizeFinal })
-      return
-    }
-    try {
-      const fileLink = await ctx.telegram.getFileLink(fileId)
-      const res      = await axios.get(fileLink.href, { responseType: 'arraybuffer', timeout: 120_000 })
-      const buffer   = Buffer.from(res.data)
-      const r2Url    = await uploadToR2(buffer, key, mime, buffer.length)
-      if (r2Url) {
-      if (isFlac) {
-        updateFlacTrackR2(trackId, r2Url)
-        const { getFlacTrack } = require('../flac/flac.repo')
-        const fullTrack = getFlacTrack(trackId)
-        await syncFlacToApi({ ...fullTrack, r2_url: r2Url })
-      } else {
-        updateTrackR2(trackId, r2Url)
-        const { getTrack } = require('../spotify/spotify.repo')
-        const fullTrack = getTrack(trackId)
-        await syncMp3ToApi({ ...fullTrack, r2_url: r2Url })
+      if (fileSizeFinal > TG_DOWNLOAD_LIMIT) return
+
+      try {
+        if (!localFilePath || !fs.existsSync(localFilePath)) {
+          throw new Error('File fisik tidak ditemukan di harddisk VPS')
+        }
+
+        // ✨ Baca file langsung dari harddisk
+        const buffer = fs.readFileSync(localFilePath)
+        
+        // Upload ke R2
+        const r2Url = await uploadToR2(buffer, key, mime, buffer.length)
+        
+        if (r2Url) {
+          if (isFlac) {
+            updateFlacTrackR2(trackId, r2Url)
+            const { getFlacTrack } = require('../flac/flac.repo')
+            const fullTrack = getFlacTrack(trackId)
+            await syncFlacToApi({ ...fullTrack, r2_url: r2Url })
+          } else {
+            updateTrackR2(trackId, r2Url)
+            const { getTrack } = require('../spotify/spotify.repo')
+            const fullTrack = getTrack(trackId)
+            await syncMp3ToApi({ ...fullTrack, r2_url: r2Url })
+          }
+        }
+        logger.info({ event: 'manual_upload_r2_ok', track: title, artist })
+      } catch (err) {
+        logger.warn({ event: 'manual_upload_r2_failed', track: title, msg: err.message })
+      } finally {
+        // ✨ AUTO-DELETE: Bersihkan file dari VPS setelah dikirim ke R2
+        if (localFilePath && fs.existsSync(localFilePath)) {
+          try {
+            // Karena file dibuat oleh Docker (root), kita gunakan akses sudo untuk menghapusnya
+            const { execSync } = require('child_process')
+            execSync(`sudo rm -f "${localFilePath}"`)
+            logger.info({ event: 'local_cache_deleted', file: localFilePath })
+          } catch (cleanupErr) {
+            logger.warn({ event: 'local_cache_delete_failed', msg: cleanupErr.message })
+          }
+        }
       }
-    }
-      logger.info({ event: 'manual_upload_r2_ok', track: title, artist })
-    } catch (err) {
-      logger.warn({ event: 'manual_upload_r2_failed', track: title, msg: err.message })
-    }
-  })()
+    })()
 
   } catch (err) {
     ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
