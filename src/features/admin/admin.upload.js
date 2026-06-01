@@ -229,10 +229,8 @@ async function handleAudioUpload(ctx) {
         }
 
         // ✨ Baca file langsung dari harddisk
-        const buffer = fs.readFileSync(localFilePath)
-        
-        // Upload ke R2
-        const r2Url = await uploadToR2(buffer, key, mime, buffer.length)
+        const fileStream = fs.createReadStream(localFilePath)
+        const r2Url = await uploadToR2(fileStream, key, mime, fileSizeFinal)
         
         if (r2Url) {
           if (isFlac) {

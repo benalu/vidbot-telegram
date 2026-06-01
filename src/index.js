@@ -37,6 +37,9 @@ const {
   pendingMetadata,
 } = require('./features/ebooks/ebooks.admin')
 
+const { handleMovieUpload, handleMovieTmdbInput, pendingMovieMeta } = require('./features/movies/movies.admin')
+const { handleSeedMovs } = require('../scripts/spider-lk21')
+
 // ---------------------------------------------------------------------------
 // Env validation at startup — fail fast
 // ---------------------------------------------------------------------------
@@ -193,6 +196,10 @@ bot.command('syncr2ebooks',  (ctx) => { if (isAdminCtx(ctx)) handleSyncR2Ebooks(
 bot.command('ebookstats',    (ctx) => { if (isAdminCtx(ctx)) handleEbookStats(ctx) })
 bot.command('listebooks',    (ctx) => { if (isAdminCtx(ctx)) handleListEbooks(ctx) })
 
+  bot.command('seedmovs', (ctx) => { 
+  if (isAdminCtx(ctx)) handleSeedMovs(ctx) 
+})
+
 // ─── Callbacks ────────────────────────────────────────────────────────────────
 bot.action(/^spot:/, handleSpotifyCallback)
 bot.action(/^srch:\d+:.+$/, handleSearchPage)
@@ -216,6 +223,11 @@ bot.on('document', async (ctx) => {
   await handleEbookUpload(ctx)
 })
 
+bot.on('video', async (ctx) => {
+  if (!isAdminCtx(ctx)) return
+  await handleMovieUpload(ctx)
+})
+
 // ─── Text handler untuk wizard metadata ebooks ───────────────────────────────
 // Hanya aktif kalau admin sedang dalam sesi input metadata
 bot.on('text', async (ctx, next) => {
@@ -225,6 +237,10 @@ bot.on('text', async (ctx, next) => {
   const userId = String(ctx.from?.id)
   if (pendingMetadata.has(userId)) {
     return handleEbookMetadataInput(ctx)
+  }
+
+  if (pendingMovieMeta.has(userId)) {
+    return handleMovieTmdbInput(ctx)
   }
 
   return next()

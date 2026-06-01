@@ -1,5 +1,5 @@
-const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3')
-const { Readable } = require('stream')
+const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3')
+const { Upload } = require('@aws-sdk/lib-storage')
 const { recordR2Failure } = require('./alerting')
 
 const client = new S3Client({
@@ -14,22 +14,22 @@ const client = new S3Client({
 const BUCKET     = process.env.R2_BUCKET
 const PUBLIC_URL = process.env.R2_PUBLIC_URL
 
-async function uploadToR2(stream, key, contentType = 'audio/mpeg', contentLength = null) {
-  let body = stream
-  if (stream instanceof Readable || typeof stream.pipe === 'function') {
-    const chunks = []
-    for await (const chunk of stream) chunks.push(chunk)
-    body = Buffer.concat(chunks)
-  }
-
+async function uploadToR2(streamOrBuffer, key, contentType = 'audio/mpeg', contentLength = null) {
   try {
-    await client.send(new PutObjectCommand({
-      Bucket:        BUCKET,
-      Key:           key,
-      Body:          body,
-      ContentType:   contentType,
-      ContentLength: contentLength || body.length,
-    }))
+    // Menggunakan Upload dari lib-storage untuk Streaming & Multipart Upload Otomatis
+    const upload = new Upload({
+      client,
+      params: {
+        Bucket: BUCKET,
+        Key: key,
+        Body: streamOrBuffer, // R2 akan menyedot langsung dari aliran data, tidak menumpuk di RAM
+        ContentType: contentType,
+      },
+      queueSize: 4,               // Mengunggah 4 potongan secara bersamaan (paralel)
+      partSize: 10 * 1024 * 1024, // Ukuran per potongan adalah 10 MB
+    })
+
+    await upload.done()
     return `${PUBLIC_URL}/${key}`
   } catch (err) {
     const trackName = key.split('/').pop().replace(/\.[^.]+$/, '') || key
@@ -37,6 +37,7 @@ async function uploadToR2(stream, key, contentType = 'audio/mpeg', contentLength
     throw err                    
   }
 }
+
 async function deleteFromR2(key) {
   await client.send(new DeleteObjectCommand({
     Bucket: BUCKET,
