@@ -51,6 +51,7 @@ async function handleMovies(ctx) {
     ).catch(err => {
       // Fallback jika pesan di archive terhapus
       ctx.reply(`❌ Gagal memuat video untuk ${escape(movie.title)}. File mungkin telah dihapus dari Archive.`, {
+         parse_mode: 'MarkdownV2',
          message_thread_id: ctx.message.message_thread_id 
       })
     })

@@ -1,4 +1,4 @@
-//src/features/spotify/spotify.repo.js
+// src/features/spotify/spotify.repo.js
 const Database = require('better-sqlite3')
 const path     = require('path')
 const fs       = require('fs')
@@ -8,7 +8,7 @@ const DB_PATH = path.join(DB_DIR, 'data.db')
 
 fs.mkdirSync(DB_DIR, { recursive: true })
 
-const db = new Database(DB_PATH)
+const db = new Database(DB_PATH, { timeout: 7000 })
 db.pragma('journal_mode = WAL')
 db.pragma('synchronous = NORMAL')
 
@@ -36,8 +36,6 @@ try { db.exec(`ALTER TABLE tracks ADD COLUMN album TEXT`) } catch {}
 try { db.exec(`ALTER TABLE tracks ADD COLUMN year  TEXT`) } catch {}
 try { db.exec(`ALTER TABLE tracks ADD COLUMN genre TEXT`) } catch {}
 try { db.exec(`ALTER TABLE tracks ADD COLUMN file_hash TEXT`) } catch {}
-
-
 
 db.exec(`CREATE INDEX IF NOT EXISTS idx_title  ON tracks (title)`)
 db.exec(`CREATE INDEX IF NOT EXISTS idx_artist ON tracks (artist)`)
@@ -67,7 +65,6 @@ const stmts = {
       year      = excluded.year,
       genre     = excluded.genre,
       file_hash = excluded.file_hash
-    -- request_count sengaja tidak di-update agar tidak ter-reset
   `),
   delete: db.prepare(`DELETE FROM tracks WHERE track_id = ?`),
   search: db.prepare(`
@@ -144,119 +141,44 @@ const stmts = {
         AND LOWER(TRIM(artist)) = LOWER(TRIM(?))
     LIMIT 1
   `),
-  getByHash: db.prepare(`SELECT * FROM tracks WHERE file_hash = ? LIMIT 1`),
-  addSpiderSeed: db.prepare(`INSERT OR IGNORE INTO spider_artists (artist_id, name, status) VALUES (?, ?, 'pending')`),
-  getQueue: db.prepare(`SELECT * FROM spider_artists WHERE status = 'pending' ORDER BY added_at ASC LIMIT ?`),
-  skipArtist: db.prepare(`DELETE FROM spider_artists WHERE status = 'pending' AND (artist_id = ? OR LOWER(name) = LOWER(?))`),
-  countPending: db.prepare(`SELECT COUNT(*) as count FROM spider_artists WHERE status = 'pending'`),
-  clearSpiderQueue: db.prepare(`DELETE FROM spider_artists WHERE status = 'pending'`),
+  getByHash: db.prepare(`SELECT * FROM tracks WHERE file_hash = ? LIMIT 1`)
 }
 
-function getTrack(trackId) {
-  return stmts.get.get(trackId) || null
-}
-
-function saveTrack(data) {
-  stmts.insert.run(data)
-}
-
-function deleteTrack(trackId) {
-  const info = stmts.delete.run(trackId)
-  return info.changes > 0
-}
-
+function getTrack(trackId) { return stmts.get.get(trackId) || null }
+function saveTrack(data) { stmts.insert.run(data) }
+function deleteTrack(trackId) { return stmts.delete.run(trackId).changes > 0 }
 function searchTracks(keyword, limit = null) {
   const normalized = keyword.toLowerCase().replace(/\s+/g, ' ').trim()
   const q          = `%${normalized}%`
-
   const words  = normalized.split(' ').filter(w => w.length > 1)
   const byWord = words.flatMap(w => {
     const wq = `%${w}%`
     return stmts.searchByWord.all(wq, wq)
   })
-
   const exact = stmts.search.all(q, q)
   const seen  = new Set(exact.map(r => r.track_id))
   const extra = byWord.filter(r => !seen.has(r.track_id))
-
   const all = [...exact, ...extra]
   return limit ? all.slice(0, limit) : all
 }
-
-function listTracks(limit = 10, offset = 0) {
-  return stmts.list.all(limit, offset)
-}
-
-function countTracks() {
-  return stmts.count.get().total
-}
-
-function getStats() {
-  const stats      = stmts.stats.get()
-  const topArtists = stmts.topArtists.all()
-  return { ...stats, topArtists }
-}
-
-function updateTrackR2(trackId, r2Url) {
-  stmts.updateR2.run(r2Url, trackId)
-}
-
-function listTracksWithoutR2() {
-  return stmts.withoutR2.all()
-}
-
-function listTracksForMetaSync() {
-  return stmts.listForMetaSync.all()
-}
-
-function updateTrackMeta(trackId, { album, year, thumbnail, genre }) {
-  stmts.updateMeta.run({ track_id: trackId, album, year, thumbnail, genre })
-}
-
-function incrementRequestCount(trackId) {
-  stmts.incrementRequest.run(trackId)
-}
-
-function getTopTracks() {
-  return stmts.topTracks.all()
-}
-
-function getRandomTrack() {
-  return stmts.random.get() || null
-}
-
-function getTrackByHash(hash) {
-  return stmts.getByHash.get(hash) || null
-}
-
-function findTrackByTitleArtist(title, artist) {
-  return stmts.findByTitleArtist.get(title, artist) || null
-}
-function addSpiderSeed(artistId, name) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS spider_artists (
-      artist_id TEXT PRIMARY KEY,
-      name TEXT,
-      status TEXT DEFAULT 'pending',
-      added_at INTEGER DEFAULT (strftime('%s', 'now'))
-    )
-  `)
-  const info = stmts.addSpiderSeed.run(artistId, name)
-  return info.changes > 0
-}
-
-function getSpiderQueue(limit = 15) { return stmts.getQueue.all(limit) }
-function skipSpiderArtist(keyword) { return stmts.skipArtist.run(keyword, keyword).changes > 0 }
-function countSpiderQueue() { return stmts.countPending.get().count }
-function clearSpiderQueue() { 
-  return stmts.clearSpiderQueue.run().changes 
-}
+function listTracks(limit = 10, offset = 0) { return stmts.list.all(limit, offset) }
+function countTracks() { return stmts.count.get().total }
+function getStats() { return { ...stmts.stats.get(), topArtists: stmts.topArtists.all() } }
+function updateTrackR2(trackId, r2Url) { stmts.updateR2.run(r2Url, trackId) }
+function listTracksWithoutR2() { return stmts.withoutR2.all() }
+function listTracksForMetaSync() { return stmts.listForMetaSync.all() }
+function updateTrackMeta(trackId, { album, year, thumbnail, genre }) { stmts.updateMeta.run({ track_id: trackId, album, year, thumbnail, genre }) }
+function incrementRequestCount(trackId) { stmts.incrementRequest.run(trackId) }
+function getTopTracks() { return stmts.topTracks.all() }
+function getRandomTrack() { return stmts.random.get() || null }
+function getTrackByHash(hash) { return stmts.getByHash.get(hash) || null }
+function findTrackByTitleArtist(title, artist) { return stmts.findByTitleArtist.get(title, artist) || null }
 
 module.exports = {
+  db, // ✨ Ekspor koneksi DB agar bisa di-reuse
   getTrack, saveTrack, deleteTrack, searchTracks,
   listTracks, countTracks, getStats, updateTrackR2,
   listTracksWithoutR2, listTracksForMetaSync, updateTrackMeta,
   incrementRequestCount, getTopTracks, getRandomTrack,
-  getTrackByHash, findTrackByTitleArtist, addSpiderSeed,
-  getSpiderQueue, skipSpiderArtist, countSpiderQueue, clearSpiderQueue 
+  getTrackByHash, findTrackByTitleArtist
 }

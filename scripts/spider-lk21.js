@@ -8,11 +8,9 @@ const crypto = require('crypto');
 
 const { escape } = require('../src/formats/utils');
 const logger = require('../src/utils/logger');
-const { uploadToR2 } = require('../src/utils/r2');
 const { searchMovieMeta } = require('../src/utils/tmdb');
-const { syncMovieToApi } = require('../src/utils/api-sync-movies');
 const { saveMovieLocal, updateMovieR2, getMovieByHash } = require('../src/features/movies/movies.repo');
-const { pendingMovieMeta } = require('../src/features/movies/movies.admin');
+const { executeMoviePipeline, pendingMovieMeta } = require('../src/features/movies/movies.admin');
 
 // URL Worker Cloudflare
 const WORKER_URL = 'https://dry-term-cd9e.vdbtpacker.workers.dev/';
@@ -72,8 +70,9 @@ async function downloadM3u8(m3u8Url, safeFileName, onProgress) {
   const isWindows = process.platform === 'win32';
   const binaryName = isWindows ? 'N_m3u8DL-RE.exe' : 'N_m3u8DL-RE';
   const exePath = path.join(__dirname, 'tools', binaryName);
+  const toolsDir = path.join(__dirname, 'tools');
   const downloadDir = path.join(__dirname, 'Downloads');
-  
+  if (!fs.existsSync(toolsDir)) fs.mkdirSync(toolsDir, { recursive: true });
   if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir, { recursive: true });
 
   const args = [
@@ -147,6 +146,80 @@ async function downloadM3u8(m3u8Url, safeFileName, onProgress) {
 
     dlProcess.on('error', reject);
   });
+}
+
+async function prosesDownloadSelesai(ctx, waitMsg, localFilePath, cleanTitle, fileStats, tgFileId, archiveMsgId, userId, threadId) {
+  try {
+    const fileHash = crypto.createHash('md5').update(localFilePath + fileStats.size).digest('hex');
+    
+    // 1. Cari Metadata Otomatis lewat TMDB
+    const meta = await searchMovieMeta(cleanTitle);
+
+    if (meta) {
+      logger.info({ event: 'lk21_tmdb_match_success', title: meta.title });
+
+      // ✨ PANGGIL CORE PIPELINE TERPUSAT
+      // Tidak perlu lagi manggil uploadToR2, updateMovieR2, syncMovieToApi, dan hapus file manual di sini!
+      await executeMoviePipeline({
+        meta,
+        localPath:  localFilePath,
+        fileSize:   fileStats.size,
+        mimeType:   'video/mp4',
+        ext:        'mp4',
+        fileId:     tgFileId,
+        messageId:  archiveMsgId,
+        fileHash:   fileHash
+      });
+
+      await ctx.telegram.editMessageText(
+        ctx.chat.id, 
+        waitMsg.message_id, 
+        undefined, 
+        `✅ *Spider Sukses\\!*\\n🎬 *${escape(meta.title)}* (${meta.year})\\n_Upload R2 & Sinkronisasi API berjalan di background\\._`, 
+        { parse_mode: 'MarkdownV2' }
+      );
+
+    } else {
+      // 2. Fallback: Jika TMDB tidak ketemu otomatis, masukkan ke pending queue terpusat
+      logger.warn({ event: 'lk21_tmdb_not_found', title: cleanTitle });
+      
+      pendingMovieMeta.set(userId, {
+        fileId:       tgFileId,
+        archiveMsgId: archiveMsgId,
+        fileSize:     fileStats.size,
+        fileHash:     fileHash,
+        mimeType:     'video/mp4',
+        localPath:    localFilePath,
+        ext:          'mp4'
+      });
+
+      // Set timeout pembersihan data menggantung (30 Menit)
+      setTimeout(() => {
+        if (pendingMovieMeta.has(userId)) {
+          const stale = pendingMovieMeta.get(userId);
+          if (stale.localPath && fs.existsSync(stale.localPath)) {
+            try { fs.unlinkSync(stale.localPath); } catch (e) {}
+          }
+          pendingMovieMeta.delete(userId);
+        }
+      }, 30 * 60 * 1000);
+
+      await ctx.telegram.editMessageText(
+        ctx.chat.id, 
+        waitMsg.message_id, 
+        undefined, 
+        `⚠️ *Spider Berhasil, Tapi TMDB Gagal\\!*\\n\\nPencarian untuk \"${escape(cleanTitle)}\" tidak akurat\\.\\n👉 Balas pesan ini dengan *ID TMDB* manual agar pipeline berjalan:`, 
+        { parse_mode: 'MarkdownV2' }
+      );
+    }
+
+  } catch (err) {
+    if (localFilePath && fs.existsSync(localFilePath)) {
+      try { fs.unlinkSync(localFilePath); } catch (e) {}
+    }
+    logger.error({ event: 'lk21_process_failed', msg: err.message });
+    ctx.reply(`❌ *Spider Gagal:* ${escape(err.message)}`, { parse_mode: 'MarkdownV2', message_thread_id: threadId });
+  }
 }
 
 // ─── MAIN HANDLER ───────────────────────────────────────────────────────────
@@ -276,69 +349,17 @@ async function handleSeedMovs(ctx) {
     await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `🔍 *Mencari Metadata TMDB\\.\\.\\.*`, { parse_mode: 'MarkdownV2' });
 
     // 5. Automasi TMDB & Database
-    logger.info({ event: 'tmdb_search_start', title: cleanTitle, year: year || 'N/A' });
-    let meta = await searchMovieMeta(cleanTitle, year);
-    
-    if (meta) {
-      logger.info({ event: 'tmdb_search_success', tmdb_id: meta.tmdb_id, found_title: meta.title });
-      const dbId = saveMovieLocal({
-        ...meta,
-        file_size: fileStats.size,
-        file_hash: fileHash,
-        r2_url: '',
-        file_id: tgFileId,
-        message_id: archiveMsgId
-      });
-
-      await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `✅ *Berhasil Ditambahkan\\!*\n🎬 *${escape(meta.title)}* \\(${escape(meta.year)}\\)\n_Upload R2 berjalan di background\\.\\.\\._`, { parse_mode: 'MarkdownV2' });
-
-      // Background Upload R2 & Hapus Lokal
-      logger.info({ event: 'r2_upload_start', target: meta.title });
-      uploadToR2(fs.createReadStream(localFilePath), `movies/${meta.tmdb_id}_${meta.title.replace(/[^a-zA-Z0-9]/g, '')}.mp4`, 'video/mp4', fileStats.size)
-        .then(async r2Url => {
-          if (r2Url) {
-            updateMovieR2(dbId, r2Url);
-            await syncMovieToApi({ ...meta, r2_url: r2Url });
-            logger.info({ event: 'lk21_r2_sync_ok', title: meta.title });
-          }
-        })
-        .catch(err => logger.error({ event: 'lk21_bg_process_failed', msg: err.message }))
-        .finally(() => {
-           try {
-             if (localFilePath && fs.existsSync(localFilePath)) {
-               fs.unlinkSync(localFilePath); 
-               logger.info({ event: 'local_cleanup_done', target: meta.title });
-             }
-           } catch (cleanupErr) {
-             logger.warn({ event: 'local_cleanup_failed', msg: cleanupErr.message });
-           }
-        });
-
-    } else {
-      logger.warn({ event: 'tmdb_search_failed', reason: 'Not found automatically', title: cleanTitle });
-      // Tunggu input manual... (kode lama tetap sama)
-      pendingMovieMeta.set(userId, {
-        fileId: tgFileId,
-        archiveMsgId: archiveMsgId,
-        fileSize: fileStats.size,
-        fileHash: fileHash,
-        mimeType: 'video/mp4',
-        localPath: localFilePath,
-        ext: 'mp4'
-      });
-
-      setTimeout(() => {
-        if (pendingMovieMeta.has(userId)) {
-          const stale = pendingMovieMeta.get(userId);
-          if (stale.localPath && fs.existsSync(stale.localPath)) {
-            try { fs.unlinkSync(stale.localPath) } catch (e) {}
-          }
-          pendingMovieMeta.delete(userId);
-        }
-      }, 30 * 60 * 1000);
-
-      await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `⚠️ *Video Selesai Diunggah\\!*\n\nPencarian otomatis TMDB untuk "${escape(cleanTitle)}" gagal\\.\n👉 Silakan balas pesan ini dengan *ID TMDB* secara manual:\n_Batas waktu 30 menit sebelum dihapus dari server_`, { parse_mode: 'MarkdownV2' });
-    }
+    await prosesDownloadSelesai(
+      ctx, 
+      waitMsg,
+      localFilePath, 
+      cleanTitle, 
+      fileStats, 
+      tgFileId, 
+      archiveMsgId, 
+      userId, 
+      threadId
+    );
 
   } catch (err) {
     if (localFilePath && fs.existsSync(localFilePath)) {

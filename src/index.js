@@ -38,7 +38,6 @@ const {
 } = require('./features/ebooks/ebooks.admin')
 
 const { handleMovieUpload, handleMovieTmdbInput, pendingMovieMeta } = require('./features/movies/movies.admin')
-const { handleSeedMovs } = require('../scripts/spider-lk21')
 
 // ---------------------------------------------------------------------------
 // Env validation at startup — fail fast
@@ -49,6 +48,8 @@ const REQUIRED_ENV = [
   'TELEGRAM_THREAD_APK', 'TELEGRAM_THREAD_VIDHUB', 'TELEGRAM_THREAD_SOCIAL',
   'TELEGRAM_THREAD_SPOTIFY', 'TELEGRAM_THREAD_EBOOKS',
   'TELEGRAM_ADMIN_GROUP_ID', 'TELEGRAM_OWNER_ID', 'TELEGRAM_ADMIN_THREAD_NOTIFY', 'TELEGRAM_ADMIN_THREAD_PANEL',
+  'TELEGRAM_ADMIN_THREAD_ALERT', 'TELEGRAM_ADMIN_THREAD_SPIDER', 'TELEGRAM_ADMIN_THREAD_SPIDER_PANEL',
+  'REST_API_URL', 'REST_API_MASTER_KEY',
   'R2_ENDPOINT', 'R2_BUCKET', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_PUBLIC_URL',
   'SPOTIFY_CLIENT_ID', 'SPOTIFY_CLIENT_SECRET', 'LASTFM_API_KEY',
 ]
@@ -195,9 +196,6 @@ bot.command('delebook',      (ctx) => { if (isAdminCtx(ctx)) handleDeleteEbook(c
 bot.command('syncr2ebooks',  (ctx) => { if (isAdminCtx(ctx)) handleSyncR2Ebooks(ctx) })
 bot.command('ebookstats',    (ctx) => { if (isAdminCtx(ctx)) handleEbookStats(ctx) })
 bot.command('listebooks',    (ctx) => { if (isAdminCtx(ctx)) handleListEbooks(ctx) })
-
-bot.command('seedmovs',      (ctx) => { if (isAdminCtx(ctx)) handleSeedMovs(ctx) 
-})
 
 // ─── Callbacks ────────────────────────────────────────────────────────────────
 bot.action(/^spot:/, handleSpotifyCallback)

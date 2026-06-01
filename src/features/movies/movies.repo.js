@@ -8,7 +8,7 @@ const DB_PATH = path.join(DB_DIR, 'data.db')
 
 fs.mkdirSync(DB_DIR, { recursive: true })
 
-const db = new Database(DB_PATH)
+const db = new Database(DB_PATH, { timeout: 7000 })
 db.pragma('journal_mode = WAL')
 
 // ✨ UPDATE: Tambahan kolom message_id

@@ -97,20 +97,21 @@ async function handleMovieTmdbInput(ctx) {
   }
 
   pendingMovieMeta.delete(userId)
-  const waitMsg = await ctx.reply('⏳ Mengambil metadata & sinkronisasi...', { parse_mode: 'MarkdownV2' })
+  const waitMsg = await ctx.reply('⏳ Mengambil metadata & menjalankan pipeline...', { parse_mode: 'MarkdownV2' })
 
   try {
     const meta = await fetchMovieMeta(tmdbId)
     
-    // ✨ Simpan ke SQLite beserta message_id dari Archive Channel
-    const dbId = saveMovieLocal({
-      ...meta,
-      file_size: state.fileSize,
-      file_hash: state.fileHash,
-      r2_url: '',
-      file_id: state.fileId,
-      message_id: state.archiveMsgId // ✨
-    })
+    await executeMoviePipeline({
+      meta:       meta,
+      localPath:  state.localPath,
+      fileSize:   state.fileSize,
+      mimeType:   state.mimeType,
+      ext:        state.ext,
+      fileId:     state.fileId,
+      messageId:  state.archiveMsgId,
+      fileHash:   state.fileHash
+    });
 
     ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
     await ctx.reply(
@@ -118,36 +119,80 @@ async function handleMovieTmdbInput(ctx) {
       { parse_mode: 'MarkdownV2' }
     )
 
-    // Upload R2 Background & Auto-Delete VPS
-    ;(async () => {
-      if (state.fileSize > TG_DOWNLOAD_LIMIT) return
-      try {
-        if (!state.localPath || !fs.existsSync(state.localPath)) throw new Error('File lokal tidak ditemukan')
-        
-        const fileStream = fs.createReadStream(state.localPath)
-        const key = `movies/${meta.tmdb_id}_${meta.title.replace(/[^a-zA-Z0-9]/g, '')}.${state.ext}`
-        const r2Url = await uploadToR2(fileStream, key, state.mimeType, state.fileSize)
-        
-        if (r2Url) {
-          updateMovieR2(dbId, r2Url)
-          await syncMovieToApi({ ...meta, r2_url: r2Url })
-          logger.info({ event: 'movie_r2_sync_ok', title: meta.title })
-        }
-      } catch (err) {
-        logger.error({ event: 'movie_bg_process_failed', msg: err.message })
-      } finally {
-        if (state.localPath && fs.existsSync(state.localPath)) {
-          try {
-            execSync(`sudo rm -f "${state.localPath}"`)
-          } catch (e) {}
-        }
-      }
-    })()
-
   } catch (err) {
     ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
     ctx.reply(`❌ Gagal: ${escape(err.message)}`, { parse_mode: 'MarkdownV2' })
   }
 }
 
-module.exports = { handleMovieUpload, handleMovieTmdbInput, pendingMovieMeta }
+/**
+ * Core Pipeline untuk Ingest/Proses Film Terpusat (SSOT & DRY)
+ */
+async function executeMoviePipeline({ meta, localPath, fileSize, mimeType, ext, fileId, messageId, fileHash }) {
+  // 1. Simpan Entri Awal ke Database Lokal (SQLite)
+  const dbId = saveMovieLocal({
+    tmdb_id:    String(meta.tmdb_id),
+    title:      meta.title,
+    year:       meta.year,
+    duration:   meta.duration,
+    rating:     meta.rating,
+    genre:      meta.genre,
+    poster:     meta.poster,
+    overview:   meta.overview,
+    file_size:  fileSize || 0,
+    file_hash:  fileHash || crypto.createHash('md5').update(meta.title + fileSize).digest('hex'),
+    r2_url:     '',
+    file_id:    fileId || '',
+    message_id: messageId || 0
+  });
+
+  // 2. Jalankan Upload R2 & Sync API di Background (Non-blocking)
+  ;(async () => {
+    try {
+      if (!localPath || !fs.existsSync(localPath)) {
+        throw new Error('File lokal tidak ditemukan untuk pemrosesan R2');
+      }
+
+      logger.info({ event: 'movie_r2_upload_start', title: meta.title });
+      const fileStream = fs.createReadStream(localPath);
+      const cleanTitle = meta.title.replace(/[^a-zA-Z0-9]/g, '');
+      const key = `movies/${meta.tmdb_id}_${cleanTitle}.${ext || 'mp4'}`;
+      
+      // Upload ke Cloudflare R2 menggunakan streaming lib-storage
+      const r2Url = await uploadToR2(fileStream, key, mimeType || 'video/mp4', fileSize);
+      
+      if (r2Url) {
+        // Update URL R2 di SQLite lokal
+        updateMovieR2(dbId, r2Url);
+        
+        // Sinkronisasi data final ke REST API utama (Golang backend)
+        await syncMovieToApi({ ...meta, r2_url: r2Url });
+        logger.info({ event: 'movie_r2_sync_ok', title: meta.title });
+      }
+    } catch (err) {
+      logger.error({ event: 'movie_bg_process_failed', title: meta.title, msg: err.message });
+    } finally {
+      // ✨ AUTO-DELETE: Pastikan file di VPS langsung dibersihkan
+      if (localPath && fs.existsSync(localPath)) {
+        try {
+          if (process.platform !== 'win32') {
+            execSync(`sudo rm -f "${localPath}"`);
+          } else {
+            fs.unlinkSync(localPath);
+          }
+          logger.info({ event: 'local_cache_deleted', file: localPath });
+        } catch (cleanupErr) {
+          logger.warn({ event: 'local_cache_delete_failed', msg: cleanupErr.message });
+        }
+      }
+    }
+  })();
+
+  return dbId;
+}
+
+module.exports = {
+  handleMovieUpload,
+  pendingMovieMeta,
+  executeMoviePipeline 
+};
