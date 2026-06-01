@@ -52,26 +52,32 @@ async function handleMovieUpload(ctx) {
     }
 
     const userIdStr = String(ctx.from.id);
+
     pendingMovieMeta.set(userIdStr, {
-      fileId: video.file_id,
-      archiveMsgId: archiveMsgId, 
-      fileSize: video.file_size || 0,
+      fileId:        video.file_id,
+      archiveMsgId:  archiveMsgId,
+      fileSize:      video.file_size || 0,
       fileHash,
-      mimeType: mime,
-      localPath: localFilePath,
-      ext: video.file_name ? video.file_name.split('.').pop() : 'mp4'
+      mimeType:      mime,
+      localPath:     localFilePath,
+      ext:           video.file_name ? video.file_name.split('.').pop() : 'mp4',
+      timeoutHandle: null   // ← placeholder dulu
     })
 
-    setTimeout(() => {
-      if (pendingMovieMeta.has(userIdStr)) {
-        const stale = pendingMovieMeta.get(userIdStr);
+    // Set timeout setelah state sudah ada di Map
+    const timeoutHandle = setTimeout(() => {
+      const stale = pendingMovieMeta.get(userIdStr);
+      if (stale) {
         if (stale.localPath && fs.existsSync(stale.localPath)) {
-          try { require('child_process').execSync(`sudo rm -f "${stale.localPath}"`) } catch (e) {}
+          try { execSync(`sudo rm -f "${stale.localPath}"`) } catch (e) {}
         }
-        pendingMovieMeta.delete(userIdStr);
-        logger.info({ event: 'pending_movie_timeout', user_id: userIdStr });
+        pendingMovieMeta.delete(userIdStr);  
+        logger.info({ event: 'pending_movie_timeout', user_id: userIdStr }); 
       }
-    }, 30 * 60 * 1000); // 30 Menit
+    }, 30 * 60 * 1000);
+
+    // Update handle ke state yang sudah ada
+    pendingMovieMeta.get(userIdStr).timeoutHandle = timeoutHandle;
 
     ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
     await ctx.reply(
@@ -96,7 +102,7 @@ async function handleMovieTmdbInput(ctx) {
     return ctx.reply('❌ TMDB ID harus berupa angka.', { parse_mode: 'MarkdownV2' })
   }
 
-  pendingMovieMeta.delete(userId)
+  clearPendingMovie(userId)
   const waitMsg = await ctx.reply('⏳ Mengambil metadata & menjalankan pipeline...', { parse_mode: 'MarkdownV2' })
 
   try {
@@ -191,8 +197,17 @@ async function executeMoviePipeline({ meta, localPath, fileSize, mimeType, ext, 
   return dbId;
 }
 
+function clearPendingMovie(userId) {
+  const state = pendingMovieMeta.get(userId);
+  if (!state) return;
+  if (state.timeoutHandle) clearTimeout(state.timeoutHandle);
+  pendingMovieMeta.delete(userId);
+}
+
+
 module.exports = {
   handleMovieUpload,
   pendingMovieMeta,
-  executeMoviePipeline 
+  clearPendingMovie,    
+  executeMoviePipeline
 };
