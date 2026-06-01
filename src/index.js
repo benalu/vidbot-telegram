@@ -196,8 +196,7 @@ bot.command('syncr2ebooks',  (ctx) => { if (isAdminCtx(ctx)) handleSyncR2Ebooks(
 bot.command('ebookstats',    (ctx) => { if (isAdminCtx(ctx)) handleEbookStats(ctx) })
 bot.command('listebooks',    (ctx) => { if (isAdminCtx(ctx)) handleListEbooks(ctx) })
 
-  bot.command('seedmovs', (ctx) => { 
-  if (isAdminCtx(ctx)) handleSeedMovs(ctx) 
+bot.command('seedmovs',      (ctx) => { if (isAdminCtx(ctx)) handleSeedMovs(ctx) 
 })
 
 // ─── Callbacks ────────────────────────────────────────────────────────────────

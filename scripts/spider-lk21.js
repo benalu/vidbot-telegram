@@ -36,14 +36,14 @@ class TurbovipExtractor {
     const videoId = match[1];
 
     const proxyPlayerUrl = `${WORKER_URL}?url=${encodeURIComponent(`https://turbovidhls.com/t/${videoId}`)}`;
-    const playerRes = await axios.get(proxyPlayerUrl, { headers: getRandomHeaders() });
+    const playerRes = await axios.get(proxyPlayerUrl, { headers: getRandomHeaders(), timeout: 10000 });
 
     const urlPlayMatch = playerRes.data.match(/var urlPlay\s*=\s*['"](.*?)['"]/);
     if (!urlPlayMatch) throw new Error('Gagal menemukan urlPlay Turbovip');
     const urlPlay = urlPlayMatch[1];
     
     const proxyM3u8Url = `${WORKER_URL}?url=${encodeURIComponent(urlPlay)}`;
-    const m3u8Res = await axios.get(proxyM3u8Url, { headers: getRandomHeaders() });
+    const m3u8Res = await axios.get(proxyM3u8Url, { headers: getRandomHeaders(), timeout: 10000 });
 
     const lines = m3u8Res.data.split('\n');
     const streams = []; 
@@ -68,7 +68,7 @@ class TurbovipExtractor {
 }
 
 // ─── DOWNLOADER ─────────────────────────────────────────────────────────────
-async function downloadM3u8(m3u8Url, safeFileName) {
+async function downloadM3u8(m3u8Url, safeFileName, onProgress) {
   const isWindows = process.platform === 'win32';
   const binaryName = isWindows ? 'N_m3u8DL-RE.exe' : 'N_m3u8DL-RE';
   const exePath = path.join(__dirname, 'tools', binaryName);
@@ -113,6 +113,7 @@ async function downloadM3u8(m3u8Url, safeFileName) {
         // Cetak ke log hanya jika melewati checkpoint baru
         if (checkpoint > lastReportedCheckpoint && checkpoint < 100) {
           logger.info({ event: 'download_progress', progress: `${checkpoint}%`, target: safeFileName });
+          if (onProgress) onProgress(checkpoint); 
           lastReportedCheckpoint = checkpoint;
         }
       } else {
@@ -149,18 +150,25 @@ async function downloadM3u8(m3u8Url, safeFileName) {
 }
 
 // ─── MAIN HANDLER ───────────────────────────────────────────────────────────
+
+let isProcessingSeedMovs = false;
 async function handleSeedMovs(ctx) {
+  const threadId = ctx.message.message_thread_id;
+  if (isProcessingSeedMovs) {
+    return ctx.reply('⏳ *Bot Sedang Sibuk*\nBot sedang memproses unduhan LK21 lain. Harap tunggu hingga selesai sebelum mengantre film baru.', { parse_mode: 'MarkdownV2', message_thread_id: threadId });
+  }
   const args = ctx.message.text.split(/\s+/);
   const url = args[1];
-  const threadId = ctx.message.message_thread_id;
   const userId = String(ctx.from.id);
 
   if (!url || !url.includes('lk21')) {
     return ctx.reply('❌ Format salah\\. Gunakan: `/seedmovs <url_lk21>`', { parse_mode: 'MarkdownV2', message_thread_id: threadId });
   }
-
+  isProcessingSeedMovs = true;
+  let localFilePath = null;
   const waitMsg = await ctx.reply('⏳ *Menganalisis URL LK21\\.\\.\\.*', { parse_mode: 'MarkdownV2', message_thread_id: threadId });
 
+  
   try {
     // 1. DOM Parsing
     const { data } = await axios.get(url, { headers: getRandomHeaders(), timeout: 15000 });
@@ -185,7 +193,7 @@ async function handleSeedMovs(ctx) {
       });
     }
 
-    if (!targetUrl) throw new Error('Iframe Turbovip tidak ditemukan di halaman ini\\.');
+    if (!targetUrl) throw new Error('Iframe Turbovip tidak ditemukan di halaman ini.');
 
     await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `⏳ Ekstraksi M3U8 *${escape(cleanTitle)}*\\.\\.\\.`, { parse_mode: 'MarkdownV2' });
     await randomDelay(1500, 3000);
@@ -196,16 +204,34 @@ async function handleSeedMovs(ctx) {
     
     // Ambil resolusi terendah untuk kecepatan
     const targetStream = result.streams[result.streams.length - 1]; 
-    if (!targetStream) throw new Error('Tidak ada stream video yang valid\\.');
+    if (!targetStream) {
+      logger.warn({ event: 'm3u8_parsing_empty', url: targetUrl });
+      throw new Error('Tidak ada stream video yang valid.'); 
+    }
 
-    const safeFileName = `${cleanTitle.replace(/[\\/:*?"<>|]/g, '')}_${Date.now()}`;
+    const safeFileName = `${cleanTitle.replace(/[^a-zA-Z0-9]/g, '_')}_${crypto.randomBytes(4).toString('hex')}`;
     
-    await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `📥 *Mengunduh Video* \\\[${escape(targetStream.quality)}\\\]\n_Proses ini memakan waktu beberapa menit \\(Stealth Mode\\)\\._`, { parse_mode: 'MarkdownV2' });
-
+    await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `📥 *Mengunduh Video* \\\[${escape(targetStream.quality)}\\\]\n⏳ Progress: *0%*\n_Proses ini memakan waktu beberapa menit\\._`, { parse_mode: 'MarkdownV2' });
+    
     // 3. Download ke VPS
-    const localFilePath = await downloadM3u8(targetStream.url, safeFileName);
+    localFilePath = await downloadM3u8(targetStream.url, safeFileName, (percent) => {
+      ctx.telegram.editMessageText(
+        ctx.chat.id, 
+        waitMsg.message_id, 
+        undefined, 
+        `📥 *Mengunduh Video* \\\[${escape(targetStream.quality)}\\\]\n⏳ Progress: *${percent}%*\n_Sedang berjalan..._`, 
+        { parse_mode: 'MarkdownV2' }
+      ).catch(() => {}); 
+    });
+    if (!fs.existsSync(localFilePath)) {
+      throw new Error('N_m3u8DL-RE gagal membentuk file video.');
+    }
+
     const fileStats = fs.statSync(localFilePath);
-    const fileHash = crypto.createHash('sha256').update(`LK21_SPIDER:${fileStats.size}`).digest('hex');
+    if (fileStats.size < 1024 * 1024) {
+      throw new Error('File hasil unduhan korup atau terlalu kecil (Kurang dari 1 MB).');
+    }
+    const fileHash = crypto.createHash('sha256').update(`LK21_SPIDER:${cleanTitle}:${year}:${fileStats.size}`).digest('hex');
 
     if (getMovieByHash(fileHash)) {
       fs.unlinkSync(localFilePath);
@@ -217,18 +243,31 @@ async function handleSeedMovs(ctx) {
     // 4. Upload ke Telegram Archive
     logger.info({ event: 'telegram_upload_start', target: cleanTitle, size_mb: (fileStats.size / 1024 / 1024).toFixed(2) });
     
-    // ✨ Konversi resolusi mentah (misal: "854x480") menjadi "480p"
     const resHeight = targetStream.quality.split('x').pop();
     const qualityLabel = isNaN(resHeight) ? targetStream.quality : `${resHeight}p`;
     
-    // ✨ Rangkai caption mentah menjadi format rapi: Judul (Tahun) - 480p
-    const rawCaption = `${cleanTitle} ${year ? `(${year}) ` : ''}- ${qualityLabel}`;
+    const strictCleanTitle = cleanTitle.replace(/([_*~`>#+\-=|{}.!])/g, '');
+    const rawCaption = `${strictCleanTitle} ${year ? `(${year}) ` : ''}- ${qualityLabel}`;
 
-    const sent = await ctx.telegram.sendVideo(ARCHIVE_CHANNEL, { source: localFilePath }, {
-      caption: escape(rawCaption),
-      parse_mode: 'MarkdownV2',
-      supports_streaming: true
-    });
+    let sent;
+    let uploadAttempt = 0;
+    while (uploadAttempt < 3) {
+      try {
+        sent = await ctx.telegram.sendVideo(ARCHIVE_CHANNEL, { source: localFilePath }, {
+          caption: escape(rawCaption),
+          parse_mode: 'MarkdownV2',
+          supports_streaming: true
+        });
+        break; 
+      } catch (uploadErr) {
+        uploadAttempt++;
+        logger.warn({ event: 'telegram_upload_retry', attempt: uploadAttempt, msg: uploadErr.message });
+        if (uploadAttempt >= 3) {
+          throw new Error(`Gagal upload ke Telegram setelah 3 percobaan: ${uploadErr.message}`);
+        }
+        await randomDelay(3000, 6000);
+      }
+    }
     
     const archiveMsgId = sent.message_id;
     const tgFileId = sent.video.file_id;
@@ -265,8 +304,14 @@ async function handleSeedMovs(ctx) {
         })
         .catch(err => logger.error({ event: 'lk21_bg_process_failed', msg: err.message }))
         .finally(() => {
-           fs.unlinkSync(localFilePath); // Hapus dari VPS!
-           logger.info({ event: 'local_cleanup_done', target: meta.title });
+           try {
+             if (localFilePath && fs.existsSync(localFilePath)) {
+               fs.unlinkSync(localFilePath); 
+               logger.info({ event: 'local_cleanup_done', target: meta.title });
+             }
+           } catch (cleanupErr) {
+             logger.warn({ event: 'local_cleanup_failed', msg: cleanupErr.message });
+           }
         });
 
     } else {
@@ -282,13 +327,53 @@ async function handleSeedMovs(ctx) {
         ext: 'mp4'
       });
 
-      await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `⚠️ *Video Selesai Diunggah\\!*\n\nPencarian otomatis TMDB untuk "${escape(cleanTitle)}" gagal\\.\n👉 Silakan balas pesan ini dengan *ID TMDB* secara manual:`, { parse_mode: 'MarkdownV2' });
+      setTimeout(() => {
+        if (pendingMovieMeta.has(userId)) {
+          const stale = pendingMovieMeta.get(userId);
+          if (stale.localPath && fs.existsSync(stale.localPath)) {
+            try { fs.unlinkSync(stale.localPath) } catch (e) {}
+          }
+          pendingMovieMeta.delete(userId);
+        }
+      }, 30 * 60 * 1000);
+
+      await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `⚠️ *Video Selesai Diunggah\\!*\n\nPencarian otomatis TMDB untuk "${escape(cleanTitle)}" gagal\\.\n👉 Silakan balas pesan ini dengan *ID TMDB* secara manual:\n_Batas waktu 30 menit sebelum dihapus dari server_`, { parse_mode: 'MarkdownV2' });
     }
 
   } catch (err) {
+    if (localFilePath && fs.existsSync(localFilePath)) {
+      try { fs.unlinkSync(localFilePath); } catch (e) {}
+    }
+
     ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
     ctx.reply(`❌ *Gagal:* ${escape(err.message)}`, { parse_mode: 'MarkdownV2', message_thread_id: threadId });
+  } finally {
+    isProcessingSeedMovs = false; 
   }
 }
+
+// Berjalan otomatis setiap kali file ini dimuat (saat PM2 start/restart)
+function sweepOrphanedFiles() {
+  const downloadDir = path.join(__dirname, 'Downloads');
+  if (!fs.existsSync(downloadDir)) return;
+  try {
+    const files = fs.readdirSync(downloadDir);
+    const now = Date.now();
+    let swept = 0;
+    for (const file of files) {
+      const filePath = path.join(downloadDir, file);
+      const stats = fs.statSync(filePath);
+      // Jika ada file mp4/ts yang usianya lebih dari 2 Jam, hapus paksa!
+      if (now - stats.mtimeMs > 2 * 60 * 60 * 1000) {
+        fs.unlinkSync(filePath);
+        swept++;
+      }
+    }
+    if (swept > 0) logger.info({ event: 'orphaned_files_swept', count: swept });
+  } catch (err) {
+    logger.warn({ event: 'orphaned_files_sweep_failed', msg: err.message });
+  }
+}
+sweepOrphanedFiles();
 
 module.exports = { handleSeedMovs };

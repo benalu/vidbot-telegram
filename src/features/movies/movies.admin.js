@@ -51,15 +51,27 @@ async function handleMovieUpload(ctx) {
       localFilePath = fileData.file_path.replace('/var/lib/telegram-bot-api', '/home/ubuntu/telegram-api-server/data')
     }
 
-    pendingMovieMeta.set(String(ctx.from.id), {
+    const userIdStr = String(ctx.from.id);
+    pendingMovieMeta.set(userIdStr, {
       fileId: video.file_id,
-      archiveMsgId: archiveMsgId, // ✨ Simpan Message ID
+      archiveMsgId: archiveMsgId, 
       fileSize: video.file_size || 0,
       fileHash,
       mimeType: mime,
       localPath: localFilePath,
       ext: video.file_name ? video.file_name.split('.').pop() : 'mp4'
     })
+
+    setTimeout(() => {
+      if (pendingMovieMeta.has(userIdStr)) {
+        const stale = pendingMovieMeta.get(userIdStr);
+        if (stale.localPath && fs.existsSync(stale.localPath)) {
+          try { require('child_process').execSync(`sudo rm -f "${stale.localPath}"`) } catch (e) {}
+        }
+        pendingMovieMeta.delete(userIdStr);
+        logger.info({ event: 'pending_movie_timeout', user_id: userIdStr });
+      }
+    }, 30 * 60 * 1000); // 30 Menit
 
     ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
     await ctx.reply(
