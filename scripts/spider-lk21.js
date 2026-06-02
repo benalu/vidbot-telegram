@@ -15,6 +15,10 @@ const { executeMoviePipeline, pendingMovieMeta, clearPendingMovie } = require('.
 // FIX #9 — WORKER_URL dipindah ke env, tidak hardcode
 const WORKER_URL = process.env.TURBOVIP_WORKER_URL;
 const ARCHIVE_CHANNEL = process.env.TELEGRAM_ARCHIVE_MOVS_CHANNEL_ID;
+const ADMIN_GROUP_ID = process.env.TELEGRAM_ADMIN_GROUP_ID;
+const ADMIN_THREAD_SPIDER = Number(process.env.TELEGRAM_ADMIN_THREAD_SPIDER || 0);
+const M3U8_THREAD_COUNT = Math.max(1, parseInt(process.env.M3U8_THREAD_COUNT || '2', 10) || 2);
+const LK21_PREFER_QUALITY = (process.env.LK21_PREFER_QUALITY || 'lowest').toLowerCase();
 
 const randomDelay = (min = 1500, max = 3500) => {
   return new Promise(resolve => setTimeout(resolve, Math.floor(Math.random() * (max - min + 1)) + min));
@@ -97,7 +101,7 @@ async function downloadM3u8(m3u8Url, safeFileName, onProgress) {
     '--save-name', safeFileName,
     '--save-dir', downloadDir,
     '--tmp-dir', downloadDir,
-    '--thread-count', '2',
+    '--thread-count', String(M3U8_THREAD_COUNT),
     '--download-retry-count', '3',
     '--auto-select',
     '--mp4-real-time-decryption'
@@ -114,12 +118,15 @@ async function downloadM3u8(m3u8Url, safeFileName, onProgress) {
       if (!text) return;
 
       const match = text.match(/(\d{1,3})\.\d+%/);
+      const speedMatch = text.match(/([\d.]+)\s*(KB\/s|MB\/s|GB\/s)/i);
+      const speedText = speedMatch ? `${speedMatch[1]} ${speedMatch[2]}` : null;
+
       if (match) {
         const currentProgress = parseInt(match[1], 10);
         const checkpoint = Math.floor(currentProgress / 20) * 20;
         if (checkpoint > lastReportedCheckpoint && checkpoint < 100) {
-          logger.info({ event: 'download_progress', progress: `${checkpoint}%`, target: safeFileName });
-          if (onProgress) onProgress(checkpoint);
+          logger.info({ event: 'download_progress', progress: `${checkpoint}%`, speed: speedText, target: safeFileName });
+          if (onProgress) onProgress(checkpoint, speedText);
           lastReportedCheckpoint = checkpoint;
         }
       } else {
@@ -150,9 +157,27 @@ async function downloadM3u8(m3u8Url, safeFileName, onProgress) {
   });
 }
 
-async function prosesDownloadSelesai(ctx, waitMsg, localFilePath, cleanTitle, fileStats, tgFileId, archiveMsgId, userId, threadId, fileHash) {
+async function notifySpiderSuccess(ctx, meta, fileStats, archiveMsgId, fileHash) {
+  if (!ADMIN_GROUP_ID || !ADMIN_THREAD_SPIDER) return;
+
+  const sizeMb = (fileStats.size / 1024 / 1024).toFixed(2);
+  const text =
+    `🕸️ *LK21 Spider Selesai*\n\n` +
+    `🎬 *${escape(meta.title || 'LK21 Movie')}*\n` +
+    `📅 Tahun: ${escape(meta.year || '-')}\n` +
+    `📦 Ukuran: ${escape(sizeMb)} MB\n` +
+    `🆔 Archive Msg: ${archiveMsgId}\n` +
+    `🧾 File Hash: \`${escape(fileHash)}\``;
+
+  await ctx.telegram.sendMessage(ADMIN_GROUP_ID, text, {
+    parse_mode: 'MarkdownV2',
+    message_thread_id: ADMIN_THREAD_SPIDER
+  }).catch(() => {});
+}
+
+async function prosesDownloadSelesai(ctx, waitMsg, localFilePath, cleanTitle, fileStats, tgFileId, archiveMsgId, userId, threadId, fileHash, tmdbMeta = null) {
   try {
-    const meta = await searchMovieMeta(cleanTitle);
+    const meta = tmdbMeta || (await searchMovieMeta(cleanTitle));
 
     if (meta) {
       logger.info({ event: 'lk21_tmdb_match_success', title: meta.title });
@@ -181,6 +206,8 @@ async function prosesDownloadSelesai(ctx, waitMsg, localFilePath, cleanTitle, fi
         `✅ *Spider Sukses\\!*\n🎬 *${escape(meta.title)}* \\(${escape(meta.year)}\\)\n_Upload R2 & Sinkronisasi API berjalan di background\\._`,
         { parse_mode: 'MarkdownV2' }
       );
+
+      await notifySpiderSuccess(ctx, meta, fileStats, archiveMsgId, fileHash);
 
     } else {
       logger.warn({ event: 'lk21_tmdb_not_found', title: cleanTitle });
@@ -276,14 +303,37 @@ async function handleSeedMovs(ctx) {
 
   try {
     // 1. DOM Parsing
-    const { data } = await axios.get(url, { headers: getRandomHeaders(), timeout: 15000 });
-    const $ = cheerio.load(data);
+    let pageData;
+    try {
+      const resp = await axios.get(url, { headers: getRandomHeaders(), timeout: 15000 });
+      pageData = resp.data;
+      
+      // Deteksi Cloudflare challenge
+      if (resp.status === 403 || 
+          (typeof pageData === 'string' && (
+            pageData.includes('cf-browser-verification') ||
+            pageData.includes('Just a moment') ||
+            pageData.includes('Checking your browser') ||
+            pageData.includes('cf_clearance')
+          ))
+      ) {
+        throw new Error('Halaman LK21 diblokir oleh Cloudflare. Bot tidak bisa bypass proteksi ini secara otomatis.');
+      }
+    } catch (err) {
+      // Re-throw dengan pesan yang lebih spesifik untuk kasus 403
+      if (err.response?.status === 403) {
+        throw new Error('Akses ditolak (HTTP 403) — Cloudflare memblokir request. Coba lagi nanti atau gunakan URL berbeda.');
+      }
+      throw err;
+    }
+
+    const $ = cheerio.load(pageData);
 
     let rawTitle = $('div.movie-info > h1').text() || $('h1').first().text();
     let cleanTitle = rawTitle.replace(/^Nonton\s+/i, '').replace(/\s*Sub\s+Indo\s+di\s+Lk21\s*$/i, '').trim();
 
     if (!cleanTitle) {
-      throw new Error('Gagal mengekstrak judul. Struktur halaman LK21 mungkin berubah.');
+      throw new Error('Gagal mengekstrak judul. Struktur halaman LK21 mungkin berubah atau terkena Cloudflare protection.');
     }
 
     let year = '';
@@ -328,24 +378,33 @@ async function handleSeedMovs(ctx) {
     // 2. Ekstraksi M3U8 — FIX #8: panggil function biasa, bukan instance class
     const result = await extractTurbovip(targetUrl);
 
-    // Ambil resolusi terendah untuk menghemat bandwidth VPS dan mempercepat proses
-    const targetStream = result.streams[result.streams.length - 1];
+    const preferBest = LK21_PREFER_QUALITY === 'best' || LK21_PREFER_QUALITY === 'highest';
+    const targetStream = preferBest ? result.streams[0] : result.streams[result.streams.length - 1];
     if (!targetStream) {
       logger.warn({ event: 'm3u8_parsing_empty', url: targetUrl });
       throw new Error('Tidak ada stream video yang valid.');
     }
+
+    logger.info({
+      event: 'lk21_stream_selected',
+      preference: LK21_PREFER_QUALITY,
+      quality: targetStream.quality,
+      bandwidth: targetStream.bandwidth,
+      url: targetStream.url
+    });
 
     activeSafeFileName = `${cleanTitle.replace(/[^a-zA-Z0-9]/g, '_')}_${crypto.randomBytes(4).toString('hex')}`;
 
     await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `📥 *Mengunduh Video* \\[${escape(targetStream.quality)}\\]\n⏳ Progress: *0%*\n_Proses ini memakan waktu beberapa menit\\._`, { parse_mode: 'MarkdownV2' });
 
     // 3. Download ke VPS
-    localFilePath = await downloadM3u8(targetStream.url, activeSafeFileName, (percent) => {
+    localFilePath = await downloadM3u8(targetStream.url, activeSafeFileName, (percent, speedText) => {
+      const speedLabel = speedText ? ` · ${escape(speedText)}` : '';
       ctx.telegram.editMessageText(
         ctx.chat.id,
         waitMsg.message_id,
         undefined,
-        `📥 *Mengunduh Video* \\[${escape(targetStream.quality)}\\]\n⏳ Progress: *${percent}%*\n_Sedang berjalan\\.\\.\\._`,
+        `📥 *Mengunduh Video* \\[${escape(targetStream.quality)}\\]\n⏳ Progress: *${percent}%${speedLabel}*\n_Sedang berjalan\\.\\.\\._`,
         { parse_mode: 'MarkdownV2' }
       ).catch((err) => {
         if (!err.message.includes('429')) {
@@ -381,18 +440,61 @@ async function handleSeedMovs(ctx) {
     const resHeight = targetStream.quality.split('x').pop();
     const qualityLabel = isNaN(resHeight) ? targetStream.quality : `${resHeight}p`;
 
-    const strictCleanTitle = cleanTitle.replace(/([_*~`>#+\-=|{}.!])/g, '');
-    const rawCaption = `${strictCleanTitle} ${year ? `(${year}) ` : ''}- ${qualityLabel}`;
+    // Cari metadata TMDB sebelum membangun caption agar tidak ada referensi ke variabel yang belum ada.
+    let tmdbMeta = null;
+    let thumbBuffer = null;
+
+    await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `🔍 *Mencari Metadata TMDB\.\.\.*`, { parse_mode: 'MarkdownV2' });
+    tmdbMeta = await searchMovieMeta(cleanTitle, year);
+
+    if (tmdbMeta?.poster) {
+      try {
+        const posterRes = await axios.get(
+          tmdbMeta.poster.replace('/original/', '/w500/'),
+          { responseType: 'arraybuffer', timeout: 8000 }
+        );
+        thumbBuffer = Buffer.from(posterRes.data);
+      } catch (e) {
+        logger.warn({ event: 'tmdb_poster_fetch_failed', title: cleanTitle, msg: e.message });
+      }
+    }
+
+    let richCaption;
+    if (tmdbMeta) {
+      const sizeMb = (fileStats.size / 1024 / 1024).toFixed(1);
+      const overviewTrunc = tmdbMeta.overview
+        ? (tmdbMeta.overview.length > 200 ? tmdbMeta.overview.slice(0, 197) + '...' : tmdbMeta.overview)
+        : null;
+
+      richCaption = [
+        `🎬 ${tmdbMeta.title} (${tmdbMeta.year})`,
+        tmdbMeta.rating ? `⭐ ${tmdbMeta.rating}` : null,
+        tmdbMeta.duration ? `⏱ ${tmdbMeta.duration}` : null,
+        tmdbMeta.genre ? `🎭 ${tmdbMeta.genre}` : null,
+        overviewTrunc ? `📝 ${overviewTrunc}` : null,
+        `🎞 ${qualityLabel} · 📦 ${sizeMb} MB · Spider LK21`,
+      ].filter(Boolean).join('\n');
+    } else {
+      richCaption = `${cleanTitle}${year ? ` (${year})` : ''} - ${qualityLabel} · Spider LK21`;
+    }
+
+    // Caption Telegram max 1024 karakter untuk video
+    if (richCaption.length > 1024) richCaption = richCaption.slice(0, 1021) + '...';
 
     let sent;
     let uploadAttempt = 0;
     while (uploadAttempt < 3) {
       try {
-        sent = await ctx.telegram.sendVideo(ARCHIVE_CHANNEL, { source: localFilePath }, {
-          caption: escape(rawCaption),
-          parse_mode: 'MarkdownV2',
-          supports_streaming: true
-        });
+        const sendOpts = {
+          caption: richCaption,
+          // Tanpa parse_mode — plain text lebih aman untuk caption kaya metadata
+          // MarkdownV2 rawan crash kalau ada karakter spesial di judul/overview TMDB
+          supports_streaming: true,
+        };
+        if (thumbBuffer) {
+          sendOpts.thumbnail = { source: thumbBuffer, filename: 'thumb.jpg' };
+        }
+        sent = await ctx.telegram.sendVideo(ARCHIVE_CHANNEL, { source: localFilePath }, sendOpts);
         break;
       } catch (uploadErr) {
         uploadAttempt++;
@@ -408,8 +510,6 @@ async function handleSeedMovs(ctx) {
     const tgFileId = sent.video.file_id;
     logger.info({ event: 'telegram_upload_success', archive_msg_id: archiveMsgId });
 
-    await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `🔍 *Mencari Metadata TMDB\\.\\.\\.*`, { parse_mode: 'MarkdownV2' });
-
     // 5. Automasi TMDB & Database
     await prosesDownloadSelesai(
       ctx,
@@ -421,7 +521,8 @@ async function handleSeedMovs(ctx) {
       archiveMsgId,
       userId,
       threadId,
-      fileHash
+      fileHash,
+      tmdbMeta
     );
 
   } catch (err) {
