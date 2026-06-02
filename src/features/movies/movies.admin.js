@@ -86,7 +86,8 @@ async function handleMovieUpload(ctx) {
     )
   } catch (err) {
     logger.error({ event: 'archive_failed', msg: err.message })
-    ctx.reply(`❌ Gagal menyimpan ke archive: ${err.message}`)
+    ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
+    ctx.reply(`❌ Gagal menyimpan ke archive: ${escape(err.message)}`, { parse_mode: 'MarkdownV2' })
   }
 }
 
@@ -116,7 +117,13 @@ async function handleMovieTmdbInput(ctx) {
       ext:        state.ext,
       fileId:     state.fileId,
       messageId:  state.archiveMsgId,
-      fileHash:   state.fileHash
+      fileHash:   state.fileHash,
+      onBgError:  (errMsg) => {
+        ctx.reply(
+          `⚠️ *R2 Upload Gagal*\n🎬 *${escape(meta.title)}*\n_${escape(errMsg)}_`,
+          { parse_mode: 'MarkdownV2' }
+        ).catch(() => {})
+      }
     });
 
     ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {})
@@ -134,7 +141,7 @@ async function handleMovieTmdbInput(ctx) {
 /**
  * Core Pipeline untuk Ingest/Proses Film Terpusat (SSOT & DRY)
  */
-async function executeMoviePipeline({ meta, localPath, fileSize, mimeType, ext, fileId, messageId, fileHash }) {
+async function executeMoviePipeline({ meta, localPath, fileSize, mimeType, ext, fileId, messageId, fileHash, onBgError }) {
   // 1. Simpan Entri Awal ke Database Lokal (SQLite)
   const dbId = saveMovieLocal({
     tmdb_id:    String(meta.tmdb_id),
@@ -177,6 +184,7 @@ async function executeMoviePipeline({ meta, localPath, fileSize, mimeType, ext, 
       }
     } catch (err) {
       logger.error({ event: 'movie_bg_process_failed', title: meta.title, msg: err.message });
+      if (onBgError) onBgError(err.message);
     } finally {
       // ✨ AUTO-DELETE: Pastikan file di VPS langsung dibersihkan
       if (localPath && fs.existsSync(localPath)) {
