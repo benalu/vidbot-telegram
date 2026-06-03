@@ -12,7 +12,7 @@ const { searchMovieMeta } = require('../src/utils/tmdb');
 const { saveMovieLocal, updateMovieR2, getMovieByHash, searchMoviesLocal } = require('../src/features/movies/movies.repo');
 const { executeMoviePipeline, pendingMovieMeta, clearPendingMovie } = require('../src/features/movies/movies.admin');
 
-// FIX #9 — WORKER_URL dipindah ke env, tidak hardcode
+// ─── ENV CONSTANTS ───────────────────────
 const WORKER_URL = process.env.TURBOVIP_WORKER_URL;
 const ARCHIVE_CHANNEL = process.env.TELEGRAM_ARCHIVE_MOVS_CHANNEL_ID;
 const ADMIN_GROUP_ID = process.env.TELEGRAM_ADMIN_GROUP_ID;
@@ -20,17 +20,85 @@ const ADMIN_THREAD_SPIDER = Number(process.env.TELEGRAM_ADMIN_THREAD_SPIDER || 0
 const M3U8_THREAD_COUNT = Math.max(1, parseInt(process.env.M3U8_THREAD_COUNT || '2', 10) || 2);
 const LK21_PREFER_QUALITY = (process.env.LK21_PREFER_QUALITY || 'lowest').toLowerCase();
 
+// ─── PATH CONSTANTS — dihitung sekali saat module load ───────────────────────
+const IS_WINDOWS   = process.platform === 'win32';
+const BINARY_NAME  = IS_WINDOWS ? 'N_m3u8DL-RE.exe' : 'N_m3u8DL-RE';
+const EXE_PATH     = path.join(__dirname, 'tools', BINARY_NAME);
+const DOWNLOAD_DIR = path.join(__dirname, 'Downloads');
+
+// Setup direktori saat module load — tidak perlu cek ulang setiap invokasi
+if (!fs.existsSync(path.join(__dirname, 'tools'))) {
+  fs.mkdirSync(path.join(__dirname, 'tools'), { recursive: true });
+}
+if (!fs.existsSync(DOWNLOAD_DIR)) {
+  fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+}
+
+function gaussianRandom(min, max) {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  let num = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+  num = num / 10.0 + 0.5;
+  if (num > 1 || num < 0) return gaussianRandom(min, max); 
+  return Math.floor(num * (max - min) + min);
+}
+
 const randomDelay = (min = 1500, max = 3500) => {
-  return new Promise(resolve => setTimeout(resolve, Math.floor(Math.random() * (max - min + 1)) + min));
+  return new Promise(resolve => setTimeout(resolve, gaussianRandom(min, max)));
 };
 
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+];
+
+const REFERERS = [
+  'https://www.google.com/search?q=nonton+film+terbaru',
+  'https://www.google.com/search?q=nonton+film+subtitle+indonesia',
+  'https://www.google.com/',
+  'https://www.facebook.com/',
+];
+
 const getRandomHeaders = () => ({
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'User-Agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-  'Referer': 'https://www.google.com/search?q=nonton+film+terbaru'
+  'Referer': REFERERS[Math.floor(Math.random() * REFERERS.length)],
 });
 
-// FIX #8 — Class tidak perlu, tidak ada state yang disimpan. Jadikan function biasa.
+const getRandomHeaders = () => ({
+  'User-Agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Referer': REFERERS[Math.floor(Math.random() * REFERERS.length)],
+});
+
+
+// Helper retry untuk axios GET — transient timeout/network error dicoba ulang
+// maxAttempts=3 berarti 1 attempt awal + 2 retry
+async function axiosGetWithRetry(url, opts, maxAttempts = 3) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await axios.get(url, opts);
+    } catch (err) {
+      lastErr = err;
+      // Jangan retry untuk error yang pasti tidak akan berhasil:
+      // 403/404 = server sengaja menolak, bukan transient
+      const status = err.response?.status;
+      if (status === 403 || status === 404) throw err;
+      if (attempt < maxAttempts) {
+        const backoff = attempt * 2000; // 2 detik, 4 detik
+        logger.warn({ event: 'axios_retry', attempt, url: url.slice(0, 80), msg: err.message });
+        await new Promise(r => setTimeout(r, backoff));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 async function extractTurbovip(iframeUrl) {
   // FIX #9 — Guard jika env belum diset
   if (!WORKER_URL) throw new Error('TURBOVIP_WORKER_URL belum diset di .env');
@@ -40,7 +108,7 @@ async function extractTurbovip(iframeUrl) {
   const videoId = match[1];
 
   const proxyPlayerUrl = `${WORKER_URL}?url=${encodeURIComponent(`https://turbovidhls.com/t/${videoId}`)}`;
-  const playerRes = await axios.get(proxyPlayerUrl, { headers: getRandomHeaders(), timeout: 10000 });
+  const playerRes = await axiosGetWithRetry(proxyPlayerUrl, { headers: getRandomHeaders(), timeout: 10000 });
 
   const urlPlayMatch = playerRes.data.match(/var urlPlay\s*=\s*['"](.*?)['"]/);
   if (!urlPlayMatch) throw new Error('Gagal menemukan urlPlay Turbovip');
@@ -53,9 +121,9 @@ async function extractTurbovip(iframeUrl) {
   }
 
   const proxyM3u8Url = `${WORKER_URL}?url=${encodeURIComponent(urlPlay)}`;
-  const m3u8Res = await axios.get(proxyM3u8Url, { headers: getRandomHeaders(), timeout: 10000 });
+  const m3u8Res = await axiosGetWithRetry(proxyM3u8Url, { headers: getRandomHeaders(), timeout: 10000 });
 
-  const lines = m3u8Res.data.split('\n');
+  const lines = m3u8Res.data.replace(/\r/g, '').split('\n');
   const streams = [];
 
   for (let i = 0; i < lines.length; i++) {
@@ -86,21 +154,14 @@ async function extractTurbovip(iframeUrl) {
 
 // ─── DOWNLOADER ─────────────────────────────────────────────────────────────
 async function downloadM3u8(m3u8Url, safeFileName, onProgress) {
-  const isWindows = process.platform === 'win32';
-  const binaryName = isWindows ? 'N_m3u8DL-RE.exe' : 'N_m3u8DL-RE';
-  const exePath = path.join(__dirname, 'tools', binaryName);
-  const toolsDir = path.join(__dirname, 'tools');
-  const downloadDir = path.join(__dirname, 'Downloads');
-  if (!fs.existsSync(toolsDir)) fs.mkdirSync(toolsDir, { recursive: true });
-  if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir, { recursive: true });
 
   const args = [
     m3u8Url,
     '--header', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
     '--header', 'Referer: https://turbovidhls.com/',
     '--save-name', safeFileName,
-    '--save-dir', downloadDir,
-    '--tmp-dir', downloadDir,
+    '--save-dir', DOWNLOAD_DIR,
+    '--tmp-dir', DOWNLOAD_DIR,
     '--thread-count', String(M3U8_THREAD_COUNT),
     '--download-retry-count', '3',
     '--auto-select',
@@ -110,14 +171,14 @@ async function downloadM3u8(m3u8Url, safeFileName, onProgress) {
   return new Promise((resolve, reject) => {
     logger.info({ event: 'download_started', target: safeFileName });
 
-    const dlProcess = spawn(exePath, args);
+    const dlProcess = spawn(EXE_PATH, args);
     let lastReportedCheckpoint = 0;
 
     dlProcess.stdout.on('data', (data) => {
       const text = data.toString().trim();
       if (!text) return;
 
-      const match = text.match(/(\d{1,3})\.\d+%/);
+      const match = text.match(/(\d{1,3})(?:\.\d+)?%/);
       const speedMatch = text.match(/([\d.]+)\s*(KB\/s|MB\/s|GB\/s)/i);
       const speedText = speedMatch ? `${speedMatch[1]} ${speedMatch[2]}` : null;
 
@@ -147,7 +208,7 @@ async function downloadM3u8(m3u8Url, safeFileName, onProgress) {
     dlProcess.on('close', (code) => {
       if (code === 0) {
         logger.info({ event: 'download_success', target: safeFileName });
-        resolve(path.join(downloadDir, `${safeFileName}.mp4`));
+        resolve(path.join(DOWNLOAD_DIR, `${safeFileName}.mp4`));
       } else {
         reject(new Error(`N_m3u8DL-RE gagal dengan kode exit: ${code}`));
       }
@@ -175,9 +236,9 @@ async function notifySpiderSuccess(ctx, meta, fileStats, archiveMsgId, fileHash)
   }).catch(() => {});
 }
 
-async function prosesDownloadSelesai(ctx, waitMsg, localFilePath, cleanTitle, fileStats, tgFileId, archiveMsgId, userId, threadId, fileHash, tmdbMeta = null) {
+async function prosesDownloadSelesai({ ctx, waitMsg, localFilePath, cleanTitle, year = '', fileStats, tgFileId, archiveMsgId, userId, threadId, fileHash, tmdbMeta = null }) {
   try {
-    const meta = tmdbMeta || (await searchMovieMeta(cleanTitle));
+    const meta = tmdbMeta || (await searchMovieMeta(cleanTitle, year));
 
     if (meta) {
       logger.info({ event: 'lk21_tmdb_match_success', title: meta.title });
@@ -213,7 +274,6 @@ async function prosesDownloadSelesai(ctx, waitMsg, localFilePath, cleanTitle, fi
       logger.warn({ event: 'lk21_tmdb_not_found', title: cleanTitle });
 
       // FIX #5 — Set state ke Map DULU, baru buat timeout.
-      // Ini menghindari race condition di mana timeout firing sebelum state tersimpan.
       pendingMovieMeta.set(userId, {
         fileId:        tgFileId,
         archiveMsgId:  archiveMsgId,
@@ -222,25 +282,20 @@ async function prosesDownloadSelesai(ctx, waitMsg, localFilePath, cleanTitle, fi
         mimeType:      'video/mp4',
         localPath:     localFilePath,
         ext:           'mp4',
-        timeoutHandle: null  // placeholder, diisi setelah setTimeout
+        timeoutHandle: null
       });
 
       const timeoutHandle = setTimeout(() => {
         const stale = pendingMovieMeta.get(userId);
-        // Guard: pastikan ini state yang sama (archiveMsgId cocok), bukan state baru yang sudah override
         if (stale && stale.archiveMsgId === archiveMsgId) {
           if (stale.localPath && fs.existsSync(stale.localPath)) {
             try { fs.unlinkSync(stale.localPath); } catch (e) {}
           }
-          // Langsung delete dari Map, tidak perlu clearPendingMovie karena
-          // clearTimeout pada diri sendiri dari dalam callback tidak berbahaya
-          // tapi juga tidak perlu — timeout sudah firing.
           pendingMovieMeta.delete(userId);
           logger.info({ event: 'lk21_pending_timeout', title: cleanTitle });
         }
       }, 30 * 60 * 1000);
 
-      // Update timeoutHandle ke state yang sudah ada di Map
       pendingMovieMeta.get(userId).timeoutHandle = timeoutHandle;
 
       await ctx.telegram.editMessageText(
@@ -264,11 +319,6 @@ async function prosesDownloadSelesai(ctx, waitMsg, localFilePath, cleanTitle, fi
 
 // ─── MAIN HANDLER ───────────────────────────────────────────────────────────
 
-// FIX #1 — Ganti timestamp-based lock dengan boolean sederhana.
-// Boolean tidak punya masalah "lock aktif terlalu lama" jika finally tidak sempat jalan.
-// finally di try/catch SELALU jalan kecuali process.exit() atau crash total —
-// dan dalam kedua kasus itu, timestamp lock juga tidak akan di-reset.
-// Boolean lebih jelas dan tidak ada edge case lock "stuck 45 menit".
 let seedMovsLock = false;
 
 async function handleSeedMovs(ctx) {
@@ -278,7 +328,6 @@ async function handleSeedMovs(ctx) {
     return ctx.reply('❌ *Konfigurasi Error:* TELEGRAM_ARCHIVE_MOVS_CHANNEL_ID belum diset di \\.env', { parse_mode: 'MarkdownV2', message_thread_id: threadId });
   }
 
-  // FIX #9 — Guard WORKER_URL di entry point, bukan di dalam extractor saja
   if (!WORKER_URL) {
     return ctx.reply('❌ *Konfigurasi Error:* TURBOVIP_WORKER_URL belum diset di \\.env', { parse_mode: 'MarkdownV2', message_thread_id: threadId });
   }
@@ -291,8 +340,14 @@ async function handleSeedMovs(ctx) {
   const url = args[1];
   const userId = String(ctx.from.id);
 
-  if (!url || !url.includes('lk21')) {
-    return ctx.reply('❌ Format salah\\. Gunakan: `/seedmovs <url_lk21>`', { parse_mode: 'MarkdownV2', message_thread_id: threadId });
+  // FIX B-1 — Tambah validasi url.startsWith('http') agar input tanpa
+  // protocol (contoh: "lk21" atau "lk21.one/film/...") tidak lolos validasi
+  // dan axios.get() tidak throw ERR_INVALID_URL yang tidak informatif.
+  if (!url || !url.startsWith('http') || !url.includes('lk21')) {
+    return ctx.reply(
+      '❌ Format salah\\. Gunakan: `/seedmovs <url_lk21>`\n_Contoh: `https://lk21\\.one/film/judul\\-film`_',
+      { parse_mode: 'MarkdownV2', message_thread_id: threadId }
+    );
   }
 
   // Set lock SETELAH semua validasi awal lulus
@@ -305,7 +360,7 @@ async function handleSeedMovs(ctx) {
     // 1. DOM Parsing
     let pageData;
     try {
-      const resp = await axios.get(url, { headers: getRandomHeaders(), timeout: 15000 });
+      const resp = await axiosGetWithRetry(url, { headers: getRandomHeaders(), timeout: 15000 });
       pageData = resp.data;
       
       // Deteksi Cloudflare challenge
@@ -320,7 +375,6 @@ async function handleSeedMovs(ctx) {
         throw new Error('Halaman LK21 diblokir oleh Cloudflare. Bot tidak bisa bypass proteksi ini secara otomatis.');
       }
     } catch (err) {
-      // Re-throw dengan pesan yang lebih spesifik untuk kasus 403
       if (err.response?.status === 403) {
         throw new Error('Akses ditolak (HTTP 403) — Cloudflare memblokir request. Coba lagi nanti atau gunakan URL berbeda.');
       }
@@ -330,7 +384,16 @@ async function handleSeedMovs(ctx) {
     const $ = cheerio.load(pageData);
 
     let rawTitle = $('div.movie-info > h1').text() || $('h1').first().text();
-    let cleanTitle = rawTitle.replace(/^Nonton\s+/i, '').replace(/\s*Sub\s+Indo\s+di\s+Lk21\s*$/i, '').trim();
+    let cleanTitle = rawTitle
+    .replace(/^Nonton\s+/i, '')           // "Nonton X" → "X"
+    .replace(/^Download\s+Film\s+/i, '')  // "Download Film X" → "X"
+    .replace(/^Nonton\s+Film\s+/i, '')    // "Nonton Film X" → "X"
+    .replace(/^Film\s+/i, '')             // "Film X" → "X" (sisa setelah strip prefix lain)
+    .replace(/\s*Sub(?:title)?\s+Indo(?:nesia)?\s+di\s+Lk21\s*$/i, '')  // "... Sub Indo di Lk21"
+    .replace(/\s*Sub(?:title)?\s+Indo(?:nesia)?\s*$/i, '')               // "... Sub Indo" atau "... Subtitle Indonesia"
+    .replace(/\s*\|\s*.*$/i, '')          // "Judul | Kategori" → "Judul"
+    .replace(/\s+/g, ' ')                 // normalize multiple whitespace
+    .trim();
 
     if (!cleanTitle) {
       throw new Error('Gagal mengekstrak judul. Struktur halaman LK21 mungkin berubah atau terkena Cloudflare protection.');
@@ -343,10 +406,6 @@ async function handleSeedMovs(ctx) {
       cleanTitle = cleanTitle.replace(/\(\d{4}\)/, '').trim();
     }
 
-    // Early duplicate check — hanya jika tahun diketahui.
-    // searchMoviesLocal pakai LIKE %keyword% sehingga bisa return film
-    // dengan judul mirip. Tanpa tahun, tidak ada cara membedakan duplikat
-    // dari film berbeda yang judulnya serupa. Biarkan hash final yang menentukan.
     if (year) {
       const existingMovies = searchMoviesLocal(cleanTitle);
       const duplicate = existingMovies.find(m => m.year === year);
@@ -375,7 +434,7 @@ async function handleSeedMovs(ctx) {
     await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `⏳ Ekstraksi M3U8 *${escape(cleanTitle)}*\\.\\.\\.`, { parse_mode: 'MarkdownV2' });
     await randomDelay(1500, 3000);
 
-    // 2. Ekstraksi M3U8 — FIX #8: panggil function biasa, bukan instance class
+    // 2. Ekstraksi M3U8
     const result = await extractTurbovip(targetUrl);
 
     const preferBest = LK21_PREFER_QUALITY === 'best' || LK21_PREFER_QUALITY === 'highest';
@@ -393,7 +452,8 @@ async function handleSeedMovs(ctx) {
       url: targetStream.url
     });
 
-    activeSafeFileName = `${cleanTitle.replace(/[^a-zA-Z0-9]/g, '_')}_${crypto.randomBytes(4).toString('hex')}`;
+    const safePart = cleanTitle.replace(/[^a-zA-Z0-9]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+    activeSafeFileName = `${safePart || 'movie'}_${crypto.randomBytes(4).toString('hex')}`;
 
     await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `📥 *Mengunduh Video* \\[${escape(targetStream.quality)}\\]\n⏳ Progress: *0%*\n_Proses ini memakan waktu beberapa menit\\._`, { parse_mode: 'MarkdownV2' });
 
@@ -422,13 +482,18 @@ async function handleSeedMovs(ctx) {
       throw new Error('File hasil unduhan korup atau terlalu kecil (Kurang dari 1 MB).');
     }
 
-    // Hash final dengan fileSize — ini yang disimpan ke DB untuk deduplikasi akurat
     const fileHash = crypto.createHash('sha256')
       .update(`LK21_SPIDER:${cleanTitle}:${year}:${fileStats.size}`)
       .digest('hex');
 
+    // FIX B-2 — Tambah try-catch di sekitar unlinkSync.
+    // Tanpa guard ini, jika file sudah terhapus oleh sweepOrphanedFiles
+    // atau proses lain (race condition), ENOENT akan masuk ke catch utama
+    // dan menghasilkan error message menyesatkan seolah pipeline yang gagal.
     if (getMovieByHash(fileHash)) {
-      fs.unlinkSync(localFilePath);
+      try { fs.unlinkSync(localFilePath); } catch (e) {
+        logger.warn({ event: 'lk21_unlink_skip', msg: e.message, file: localFilePath });
+      }
       return ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `ℹ️ Film *${escape(cleanTitle)}* sudah ada di database\\. Unduhan dibatalkan\\.`, { parse_mode: 'MarkdownV2' });
     }
 
@@ -440,7 +505,6 @@ async function handleSeedMovs(ctx) {
     const resHeight = targetStream.quality.split('x').pop();
     const qualityLabel = isNaN(resHeight) ? targetStream.quality : `${resHeight}p`;
 
-    // Cari metadata TMDB sebelum membangun caption agar tidak ada referensi ke variabel yang belum ada.
     let tmdbMeta = null;
     let thumbBuffer = null;
 
@@ -478,7 +542,6 @@ async function handleSeedMovs(ctx) {
       richCaption = `${cleanTitle}${year ? ` (${year})` : ''} - ${qualityLabel} · Spider LK21`;
     }
 
-    // Caption Telegram max 1024 karakter untuk video
     if (richCaption.length > 1024) richCaption = richCaption.slice(0, 1021) + '...';
 
     let sent;
@@ -487,12 +550,15 @@ async function handleSeedMovs(ctx) {
       try {
         const sendOpts = {
           caption: richCaption,
-          // Tanpa parse_mode — plain text lebih aman untuk caption kaya metadata
-          // MarkdownV2 rawan crash kalau ada karakter spesial di judul/overview TMDB
           supports_streaming: true,
         };
         if (thumbBuffer) {
           sendOpts.thumbnail = { source: thumbBuffer, filename: 'thumb.jpg' };
+        }
+        try {
+          fs.accessSync(localFilePath, fs.constants.R_OK);
+        } catch (e) {
+          throw new Error(`File tidak bisa dibaca sebelum upload: ${e.message}`);
         }
         sent = await ctx.telegram.sendVideo(ARCHIVE_CHANNEL, { source: localFilePath }, sendOpts);
         break;
@@ -511,31 +577,20 @@ async function handleSeedMovs(ctx) {
     logger.info({ event: 'telegram_upload_success', archive_msg_id: archiveMsgId });
 
     // 5. Automasi TMDB & Database
-    await prosesDownloadSelesai(
-      ctx,
-      waitMsg,
-      localFilePath,
-      cleanTitle,
-      fileStats,
-      tgFileId,
-      archiveMsgId,
-      userId,
-      threadId,
-      fileHash,
-      tmdbMeta
-    );
-
+    await prosesDownloadSelesai({
+      ctx, waitMsg, localFilePath, cleanTitle, year,
+      fileStats, tgFileId, archiveMsgId,
+      userId, threadId, fileHash, tmdbMeta,
+    });
   } catch (err) {
     try {
       if (localFilePath && fs.existsSync(localFilePath)) {
         fs.unlinkSync(localFilePath);
       }
       if (activeSafeFileName) {
-        const dlDir = path.join(__dirname, 'Downloads');
-        const partialFile = path.join(dlDir, `${activeSafeFileName}.mp4`);
-        const tmpFolder = path.join(dlDir, activeSafeFileName);
+        const partialFile = path.join(DOWNLOAD_DIR, `${activeSafeFileName}.mp4`);
+        const tmpFolder = path.join(DOWNLOAD_DIR, activeSafeFileName);
         if (fs.existsSync(partialFile)) fs.unlinkSync(partialFile);
-        // FIX #3 — rmSync juga handles direktori sementara N_m3u8DL-RE
         if (fs.existsSync(tmpFolder)) fs.rmSync(tmpFolder, { recursive: true, force: true });
       }
     } catch (cleanupErr) {
@@ -545,26 +600,23 @@ async function handleSeedMovs(ctx) {
     ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
     ctx.reply(`❌ *Gagal:* ${escape(err.message)}`, { parse_mode: 'MarkdownV2', message_thread_id: threadId });
   } finally {
-    // FIX #1 — Reset lock boolean, selalu jalan
     seedMovsLock = false;
   }
 }
 
 function sweepOrphanedFiles() {
-  const downloadDir = path.join(__dirname, 'Downloads');
-  if (!fs.existsSync(downloadDir)) return;
+  if (!fs.existsSync(DOWNLOAD_DIR)) return;
   try {
-    const entries = fs.readdirSync(downloadDir);
+    const entries = fs.readdirSync(DOWNLOAD_DIR);
     const now = Date.now();
     let swept = 0;
 
     for (const entry of entries) {
-      const entryPath = path.join(downloadDir, entry);
+      const entryPath = path.join(DOWNLOAD_DIR, entry);
       let stats;
       try {
         stats = fs.statSync(entryPath);
       } catch (e) {
-        // File bisa saja terhapus concurrent, skip saja
         continue;
       }
 
@@ -574,7 +626,6 @@ function sweepOrphanedFiles() {
       if (age <= OLD_ENOUGH) continue;
 
       if (stats.isDirectory()) {
-        // FIX #3 — Hapus folder sisa N_m3u8DL-RE yang sebelumnya tidak pernah dibersihkan
         try {
           fs.rmSync(entryPath, { recursive: true, force: true });
           swept++;
