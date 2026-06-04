@@ -16,25 +16,27 @@ const PUBLIC_URL = process.env.R2_PUBLIC_URL
 
 async function uploadToR2(streamOrBuffer, key, contentType = 'audio/mpeg', contentLength = null) {
   try {
-    // Menggunakan Upload dari lib-storage untuk Streaming & Multipart Upload Otomatis
     const upload = new Upload({
       client,
       params: {
         Bucket: BUCKET,
         Key: key,
-        Body: streamOrBuffer, // R2 akan menyedot langsung dari aliran data, tidak menumpuk di RAM
+        Body: streamOrBuffer,
         ContentType: contentType,
       },
-      queueSize: 4,               // Mengunggah 4 potongan secara bersamaan (paralel)
-      partSize: 10 * 1024 * 1024, // Ukuran per potongan adalah 10 MB
+      queueSize: 4,
+      partSize: 10 * 1024 * 1024,
     })
-
     await upload.done()
     return `${PUBLIC_URL}/${key}`
   } catch (err) {
-    const trackName = key.split('/').pop().replace(/\.[^.]+$/, '') || key
-    recordR2Failure(trackName)   
-    throw err                    
+    recordR2Failure({
+      track: key.split('/').pop().replace(/\.[^.]+$/, '') || key,
+      error: err.message,
+      key,
+      size:  contentLength,
+    })
+    throw err
   }
 }
 

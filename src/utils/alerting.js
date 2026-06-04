@@ -13,6 +13,8 @@
 // dan PM2 event hook atau cron external kalau butuh notifikasi crash.
 
 const axios  = require('axios')
+const path   = require('path')
+const fs     = require('fs')
 const logger = require('./logger')
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -28,17 +30,17 @@ const R2_FAIL_THRESHOLD   = 5               // alert kalau >= 5 R2 failure dalam
 const R2_FAIL_WINDOW_MS   = 10 * 60 * 1000  // window 10 menit untuk R2 failure counter
 
 // ── State ─────────────────────────────────────────────────────────────────────
-
-// Simpan timestamp tiap R2 failure — dibersihkan otomatis saat cek
 const r2FailTimestamps = []
-
-// Cooldown per alert type — hindari spam notifikasi yang sama berulang
-// Key: alert type string, Value: timestamp terakhir alert dikirim
 const alertCooldowns = new Map()
-const ALERT_COOLDOWN_MS = 15 * 60 * 1000  // satu jenis alert max sekali per 15 menit
+const ALERT_COOLDOWN_MS = 15 * 60 * 1000
+const apiWasDown  = { value: false }
+const memWasHigh  = { value: false }
 
-// Track apakah REST API sedang down — untuk kirim "recovered" saat pulih
-const apiWasDown = { value: false }
+const HEARTBEAT_TELEGRAM_INTERVAL_MS = 60 * 60 * 1000
+let lastHeartbeatTelegramTs = 0
+
+const SPIDER_STALE_THRESHOLD_MS = 20 * 60 * 1000  
+const SPIDER_STATS_PATH = path.join(__dirname, '../../data/spotify/spider-stats.json')
 
 // ── Escape MarkdownV2 (minimal, tidak import formats/utils untuk hindari circular) ──
 
@@ -90,12 +92,23 @@ async function checkMemory() {
 
   logger.info({ event: 'health_memory', heap_mb: heapMB, rss_mb: rssMB })
 
-  if (heapMB > MEMORY_THRESHOLD_MB && shouldAlert('memory')) {
+  if (heapMB > MEMORY_THRESHOLD_MB) {
+    memWasHigh.value = true
+    if (shouldAlert('memory')) {
+      await sendAlert(
+        `⚠️ *Memory Usage Tinggi*\n\n` +
+        `Heap: *${esc(heapMB)} MB* \\(threshold: ${esc(MEMORY_THRESHOLD_MB)} MB\\)\n` +
+        `RSS: *${esc(rssMB)} MB*\n\n` +
+        `_Bot masih berjalan\\. Pantau — PM2 akan restart otomatis kalau mencapai 512 MB\\._`
+      )
+    }
+  } else if (memWasHigh.value) {
+    memWasHigh.value = false
+    alertCooldowns.delete('memory') 
     await sendAlert(
-      `⚠️ *Memory Usage Tinggi*\n\n` +
-      `Heap: *${esc(heapMB)} MB* \\(threshold: ${esc(MEMORY_THRESHOLD_MB)} MB\\)\n` +
-      `RSS: *${esc(rssMB)} MB*\n\n` +
-      `_Bot masih berjalan\\. Pantau — PM2 akan restart otomatis kalau mencapai 512 MB\\._`
+      `✅ *Memory Normal Kembali*\n\n` +
+      `Heap: *${esc(heapMB)} MB*  ·  RSS: *${esc(rssMB)} MB*\n` +
+      `_Memory sudah di bawah threshold ${esc(MEMORY_THRESHOLD_MB)} MB\\._`
     )
   }
 }
@@ -153,8 +166,11 @@ async function checkRestApi() {
 // Dipanggil dari luar (r2.js atau handler) setiap kali R2 upload gagal.
 // Alerting module ini mengakumulasi dan cek threshold tiap interval.
 
-function recordR2Failure(trackTitle = '') {
-  r2FailTimestamps.push({ ts: Date.now(), track: trackTitle })
+function recordR2Failure(info = '') {
+  const entry = typeof info === 'string'
+    ? { track: info, error: null, key: null, size: null }
+    : { track: info.track || 'unknown', error: info.error || null, key: info.key || null, size: info.size || null }
+  r2FailTimestamps.push({ ts: Date.now(), ...entry })
 }
 
 async function checkR2FailureRate() {
@@ -170,10 +186,14 @@ async function checkR2FailureRate() {
 
   if (count >= R2_FAIL_THRESHOLD && shouldAlert('r2_failures')) {
     const windowMin = Math.round(R2_FAIL_WINDOW_MS / 60_000)
-    const samples   = r2FailTimestamps
-      .slice(-3)
-      .map(f => `• _${esc(f.track || 'unknown')}_`)
-      .join('\n')
+    const samples = r2FailTimestamps
+    .slice(-3)
+    .map(f => {
+      const sizePart  = f.size  ? ` \\(${esc((f.size / 1024 / 1024).toFixed(1))} MB\\)` : ''
+      const errorPart = f.error ? `\n  _↳ ${esc(f.error.slice(0, 120))}_` : ''
+      return `• _${esc(f.track || 'unknown')}_${sizePart}${errorPart}`
+    })
+    .join('\n')
 
     await sendAlert(
       `⚠️ *R2 Upload Gagal Berulang*\n\n` +
@@ -186,28 +206,74 @@ async function checkR2FailureRate() {
 
 // ── Heartbeat log (bukan alert, hanya untuk audit) ────────────────────────────
 
-function logHeartbeat() {
+async function logHeartbeat() {
   const mem   = process.memoryUsage()
   const upSec = Math.round(process.uptime())
   const upStr = upSec < 3600
     ? `${Math.floor(upSec / 60)}m ${upSec % 60}s`
     : `${Math.floor(upSec / 3600)}h ${Math.floor((upSec % 3600) / 60)}m`
+  const heapMB = Math.round(mem.heapUsed / 1024 / 1024)
+  const rssMB  = Math.round(mem.rss      / 1024 / 1024)
 
-  logger.info({
-    event:    'heartbeat',
-    uptime:   upStr,
-    heap_mb:  Math.round(mem.heapUsed / 1024 / 1024),
-    rss_mb:   Math.round(mem.rss      / 1024 / 1024),
-  })
+  // Selalu log ke stdout seperti sebelumnya
+  logger.info({ event: 'heartbeat', uptime: upStr, heap_mb: heapMB, rss_mb: rssMB })
+
+  // ID-1: Kirim ke Telegram hanya setiap 1 jam
+  if (Date.now() - lastHeartbeatTelegramTs >= HEARTBEAT_TELEGRAM_INTERVAL_MS) {
+    lastHeartbeatTelegramTs = Date.now()
+    await sendAlert(
+      `🤖 *Bot Heartbeat*\n\n` +
+      `⏱ Uptime: *${esc(upStr)}*\n` +
+      `🧠 Heap: *${esc(heapMB)} MB*\n` +
+      `💾 RSS: *${esc(rssMB)} MB*`
+    )
+  }
 }
+
+// ── Check 5: Spider MP3 staleness ──────────────────────────────────────
+
+async function checkSpider() {
+  try {
+    if (!fs.existsSync(SPIDER_STATS_PATH)) return  
+
+    const raw   = fs.readFileSync(SPIDER_STATS_PATH, 'utf8')
+    const stats = JSON.parse(raw)
+
+    const status      = stats.status || ''
+    const lastUpdated = stats.last_updated || stats.timestamp
+
+    const quietStatuses = ['DEEP_SLEEP', 'OFFLINE', 'MEMORY_RESTART']
+    if (quietStatuses.includes(status)) return
+
+    if (!lastUpdated) return  
+
+    const staleSinceMs = Date.now() - new Date(lastUpdated).getTime()
+    if (staleSinceMs < SPIDER_STALE_THRESHOLD_MS) return  // masih fresh
+
+    if (shouldAlert('spider_stale')) {
+      const staleMin = Math.round(staleSinceMs / 60_000)
+      await sendAlert(
+        `⚠️ *Spider MP3 Tidak Responsif*\n\n` +
+        `Status terakhir: \`${esc(status)}\`\n` +
+        `Tidak ada update sejak: *${esc(staleMin)} menit* lalu\n\n` +
+        `_Spider mungkin hang atau crash\\. Cek PM2: \`pm2 logs spider\\-mp3\`_`
+      )
+    }
+  } catch (err) {
+    // Jangan crash health check karena gagal baca file spider
+    logger.warn({ event: 'spider_check_failed', msg: err.message })
+  }
+}
+
 
 // ── Runner ────────────────────────────────────────────────────────────────────
 
 async function runChecks() {
-  logHeartbeat()
+  await logHeartbeat()
   await checkMemory()
   await checkRestApi()
   await checkR2FailureRate()
+  await checkSpider()
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
@@ -220,15 +286,24 @@ function startAlerting() {
 
   logger.info({ event: 'alerting_started', interval_min: CHECK_INTERVAL_MS / 60_000 })
 
-  // Jalankan sekali saat startup (delay 30 detik agar bot fully ready dulu)
+  setTimeout(async () => {
+    const now    = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })
+    const rssMB  = Math.round(process.memoryUsage().rss / 1024 / 1024)
+    await sendAlert(
+      `✅ *Bot Online*\n\n` +
+      `🕐 Waktu: *${esc(now)}*\n` +
+      `💾 RAM: *${esc(rssMB)} MB*\n\n` +
+      `_VidOpsBot berhasil start\\. PM2 restart atau deploy selesai\\._`
+    ).catch(() => {})
+  }, 10_000)
+
   setTimeout(() => {
     runChecks().catch(err => logger.warn({ event: 'alerting_check_failed', msg: err.message }))
   }, 30_000)
 
-  // Kemudian tiap interval
   setInterval(() => {
     runChecks().catch(err => logger.warn({ event: 'alerting_check_failed', msg: err.message }))
   }, CHECK_INTERVAL_MS)
 }
 
-module.exports = { startAlerting, recordR2Failure }
+module.exports = { startAlerting, recordR2Failure, sendAlert }

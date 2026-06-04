@@ -85,10 +85,11 @@ async function axiosGetWithRetry(url, opts, maxAttempts = 3) {
       return await axios.get(url, opts);
     } catch (err) {
       lastErr = err;
-      // Jangan retry untuk error yang pasti tidak akan berhasil:
-      // 403/404 = server sengaja menolak, bukan transient
       const status = err.response?.status;
       if (status === 403 || status === 404) throw err;
+      if (status === 429) {
+        throw new Error('Worker rate limit tercapai (HTTP 429). Coba lagi beberapa jam lagi.');
+      }
       if (attempt < maxAttempts) {
         const backoff = attempt * 2000; // 2 detik, 4 detik
         logger.warn({ event: 'axios_retry', attempt, url: url.slice(0, 80), msg: err.message });
@@ -171,8 +172,22 @@ async function downloadM3u8(m3u8Url, safeFileName, onProgress) {
   return new Promise((resolve, reject) => {
     logger.info({ event: 'download_started', target: safeFileName });
 
+    const DOWNLOAD_TIMEOUT_MS = 45 * 60 * 1000; // 45 menit
+    let settled = false;
+
     const dlProcess = spawn(EXE_PATH, args);
     let lastReportedCheckpoint = 0;
+
+    // BL-9 — Global timeout guard: jika binary hang dan tidak pernah emit
+    // close/error, Promise akan hang selamanya dan seedMovsLock tidak
+    // pernah di-release. Kill proses dan reject setelah 45 menit.
+    const globalTimeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      logger.warn({ event: 'download_timeout', target: safeFileName, limit_min: 45 });
+      try { dlProcess.kill('SIGKILL'); } catch (_) {}
+      reject(new Error('Download timeout: N_m3u8DL-RE tidak selesai dalam 45 menit.'));
+    }, DOWNLOAD_TIMEOUT_MS);
 
     dlProcess.stdout.on('data', (data) => {
       const text = data.toString().trim();
@@ -206,6 +221,9 @@ async function downloadM3u8(m3u8Url, safeFileName, onProgress) {
     });
 
     dlProcess.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(globalTimeout);
       if (code === 0) {
         logger.info({ event: 'download_success', target: safeFileName });
         resolve(path.join(DOWNLOAD_DIR, `${safeFileName}.mp4`));
@@ -214,7 +232,12 @@ async function downloadM3u8(m3u8Url, safeFileName, onProgress) {
       }
     });
 
-    dlProcess.on('error', reject);
+    dlProcess.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(globalTimeout);
+      reject(err);
+    });
   });
 }
 
@@ -552,7 +575,7 @@ async function handleSeedMovs(ctx) {
           caption: richCaption,
           supports_streaming: true,
         };
-        if (thumbBuffer) {
+        if (thumbBuffer && thumbBuffer.length > 1000) {
           sendOpts.thumbnail = { source: thumbBuffer, filename: 'thumb.jpg' };
         }
         try {

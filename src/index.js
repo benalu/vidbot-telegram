@@ -21,7 +21,7 @@ const {
   handleDmFlacPage,
 } = require('./features/dm/dm.handler')
 const { setupProcessHandlers } = require('./utils/process')
-const { startAlerting } = require('./utils/alerting')
+const { startAlerting, sendAlert } = require('./utils/alerting')
 
 // ─── Ebooks ───────────────────────────────────────────────────────────────────
 const { handleEbookCallback, handleEbookSearchPage } = require('./features/ebooks/ebooks.handler')
@@ -243,7 +243,7 @@ bot.on('text', async (ctx, next) => {
   return next()
 })
 
-setupProcessHandlers(bot)
+setupProcessHandlers(bot, sendAlert)
 startAlerting()
 bot.launch()
 logger.info({ status: 'started', commands: ['help', ...Object.keys(COMMANDS)] })
