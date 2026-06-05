@@ -9,8 +9,8 @@
 //   4. Bot heartbeat — dicatat tiap interval, dipakai external watchdog kalau mau nanti
 //
 // Bot crash tidak bisa dideteksi dari dalam bot sendiri (proses sudah mati).
-// Untuk itu, gunakan PM2 + `max_memory_restart` sebagai safety net,
-// dan PM2 event hook atau cron external kalau butuh notifikasi crash.
+// Untuk itu, gunakan PM2 + `max_memory_restart: 1500M` sebagai safety net.
+// Alert dikirim saat RSS > 1200 MB — memberi jeda sebelum PM2 restart di 1500 MB.
 
 const axios  = require('axios')
 const path   = require('path')
@@ -24,7 +24,7 @@ const ALERT_THREAD   = Number(process.env.TELEGRAM_ADMIN_THREAD_ALERT)
 const BOT_TOKEN      = process.env.TELEGRAM_TOKEN
 
 const CHECK_INTERVAL_MS   = 5 * 60 * 1000   // jalankan checks tiap 5 menit
-const MEMORY_THRESHOLD_MB = 400              // alert kalau heap > 400 MB
+const MEMORY_THRESHOLD_MB = 1200              // alert kalau heap > 400 MB
 const API_TIMEOUT_MS      = 8_000            // REST API harus merespons dalam 8 detik
 const R2_FAIL_THRESHOLD   = 5               // alert kalau >= 5 R2 failure dalam window
 const R2_FAIL_WINDOW_MS   = 10 * 60 * 1000  // window 10 menit untuk R2 failure counter
@@ -86,29 +86,32 @@ function shouldAlert(type) {
 // ── Check 1: Memory ───────────────────────────────────────────────────────────
 
 async function checkMemory() {
-  const heapUsed = process.memoryUsage().heapUsed
-  const heapMB   = Math.round(heapUsed / 1024 / 1024)
-  const rssMB    = Math.round(process.memoryUsage().rss / 1024 / 1024)
+  const mem    = process.memoryUsage()
+  const heapMB = Math.round(mem.heapUsed / 1024 / 1024)
+  const rssMB  = Math.round(mem.rss      / 1024 / 1024)
 
   logger.info({ event: 'health_memory', heap_mb: heapMB, rss_mb: rssMB })
 
-  if (heapMB > MEMORY_THRESHOLD_MB) {
+  // Gunakan RSS sebagai trigger — RSS adalah total RAM yang benar-benar dipakai
+  // proses di OS, termasuk Buffer, native modules, dan overhead Node.js.
+  // heapUsed hanya ukur V8 heap sehingga proses bisa OOM kill sebelum alert trigger.
+  if (rssMB > MEMORY_THRESHOLD_MB) {
     memWasHigh.value = true
     if (shouldAlert('memory')) {
       await sendAlert(
         `⚠️ *Memory Usage Tinggi*\n\n` +
-        `Heap: *${esc(heapMB)} MB* \\(threshold: ${esc(MEMORY_THRESHOLD_MB)} MB\\)\n` +
-        `RSS: *${esc(rssMB)} MB*\n\n` +
-        `_Bot masih berjalan\\. Pantau — PM2 akan restart otomatis kalau mencapai 512 MB\\._`
+        `RSS: *${esc(rssMB)} MB* \\(threshold: ${esc(MEMORY_THRESHOLD_MB)} MB\\)\n` +
+        `Heap: *${esc(heapMB)} MB*\n\n` +
+        `_Bot masih berjalan\\. Pantau — PM2 akan restart otomatis kalau RSS mencapai 1500 MB\\._`
       )
     }
   } else if (memWasHigh.value) {
     memWasHigh.value = false
-    alertCooldowns.delete('memory') 
+    alertCooldowns.delete('memory')
     await sendAlert(
       `✅ *Memory Normal Kembali*\n\n` +
-      `Heap: *${esc(heapMB)} MB*  ·  RSS: *${esc(rssMB)} MB*\n` +
-      `_Memory sudah di bawah threshold ${esc(MEMORY_THRESHOLD_MB)} MB\\._`
+      `RSS: *${esc(rssMB)} MB*  ·  Heap: *${esc(heapMB)} MB*\n` +
+      `_RSS sudah di bawah threshold ${esc(MEMORY_THRESHOLD_MB)} MB\\._`
     )
   }
 }

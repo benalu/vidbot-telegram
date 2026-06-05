@@ -8,6 +8,7 @@ const crypto = require('crypto');
 
 const { escape } = require('../src/formats/utils');
 const logger = require('../src/utils/logger');
+const { sendAlert } = require('../src/utils/alerting');
 const { searchMovieMeta } = require('../src/utils/tmdb');
 const { saveMovieLocal, updateMovieR2, getMovieByHash, searchMoviesLocal } = require('../src/features/movies/movies.repo');
 const { executeMoviePipeline, pendingMovieMeta, clearPendingMovie } = require('../src/features/movies/movies.admin');
@@ -19,6 +20,18 @@ const ADMIN_GROUP_ID = process.env.TELEGRAM_ADMIN_GROUP_ID;
 const ADMIN_THREAD_SPIDER = Number(process.env.TELEGRAM_ADMIN_THREAD_SPIDER || 0);
 const M3U8_THREAD_COUNT = Math.max(1, parseInt(process.env.M3U8_THREAD_COUNT || '2', 10) || 2);
 const LK21_PREFER_QUALITY = (process.env.LK21_PREFER_QUALITY || 'lowest').toLowerCase();
+
+// ─── STATS FILE ──────────────────────────────────────────────────────────────
+const LK21_STATS_PATH = path.join(__dirname, '../data/movies/spider-lk21-stats.json');
+
+// Session counters — di-reset setiap restart bot
+let statsSession = {
+  total_success:   0,
+  total_failed:    0,
+  total_duplicate: 0,
+  total_size_bytes: 0,
+  total_duration_ms: 0,
+};
 
 // ─── PATH CONSTANTS — dihitung sekali saat module load ───────────────────────
 const IS_WINDOWS   = process.platform === 'win32';
@@ -32,6 +45,23 @@ if (!fs.existsSync(path.join(__dirname, 'tools'))) {
 }
 if (!fs.existsSync(DOWNLOAD_DIR)) {
   fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+}
+
+// ID-7 — Validasi binary saat module load
+// Lebih baik gagal sekarang dengan pesan jelas daripada gagal di tengah pipeline
+// setelah DOM parsing dan M3U8 extraction sudah selesai.
+try {
+  fs.accessSync(EXE_PATH, fs.constants.X_OK);
+  logger.info({ event: 'lk21_binary_ok', path: EXE_PATH });
+} catch (err) {
+  // Jangan crash — bot mungkin berjalan di platform lain atau binary belum dipasang.
+  // Log warning saja; error yang spesifik akan muncul saat spawn dipanggil.
+  logger.warn({
+    event: 'lk21_binary_missing_or_not_executable',
+    path:  EXE_PATH,
+    msg:   err.message,
+    hint:  'Pastikan N_m3u8DL-RE ada di scripts/tools/ dan sudah chmod +x'
+  });
 }
 
 function gaussianRandom(min, max) {
@@ -62,12 +92,6 @@ const REFERERS = [
   'https://www.google.com/',
   'https://www.facebook.com/',
 ];
-
-const getRandomHeaders = () => ({
-  'User-Agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-  'Referer': REFERERS[Math.floor(Math.random() * REFERERS.length)],
-});
 
 const getRandomHeaders = () => ({
   'User-Agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
@@ -259,7 +283,7 @@ async function notifySpiderSuccess(ctx, meta, fileStats, archiveMsgId, fileHash)
   }).catch(() => {});
 }
 
-async function prosesDownloadSelesai({ ctx, waitMsg, localFilePath, cleanTitle, year = '', fileStats, tgFileId, archiveMsgId, userId, threadId, fileHash, tmdbMeta = null }) {
+async function prosesDownloadSelesai({ ctx, waitMsg, localFilePath, cleanTitle, year = '', fileStats, tgFileId, archiveMsgId, userId, threadId, fileHash, tmdbMeta = null, lockStartTime = null }) {
   try {
     const meta = tmdbMeta || (await searchMovieMeta(cleanTitle, year));
 
@@ -292,6 +316,14 @@ async function prosesDownloadSelesai({ ctx, waitMsg, localFilePath, cleanTitle, 
       );
 
       await notifySpiderSuccess(ctx, meta, fileStats, archiveMsgId, fileHash);
+      updateLk21Stats({
+        success:     true,
+        title:       meta.title,
+        size_bytes:  fileStats.size,
+        duration_ms: Date.now() - (lockStartTime || Date.now()),
+        status:      'IDLE',
+        active_title: '',
+      });
 
     } else {
       logger.warn({ event: 'lk21_tmdb_not_found', title: cleanTitle });
@@ -339,6 +371,62 @@ async function prosesDownloadSelesai({ ctx, waitMsg, localFilePath, cleanTitle, 
   }
 }
 
+async function notifySpiderError(url, phase, errMessage) {
+  try {
+    await sendAlert(
+      `🔴 *LK21 Spider Gagal*\n\n` +
+      `📍 Fase: \`${escape(phase)}\`\n` +
+      `❌ Error: _${escape(errMessage.slice(0, 300))}_\n` +
+      `🔗 URL: \`${escape(url.slice(0, 100))}\``
+    )
+  } catch (_) {}
+}
+
+function updateLk21Stats(patch) {
+  try {
+    let current = {}
+    if (fs.existsSync(LK21_STATS_PATH)) {
+      current = JSON.parse(fs.readFileSync(LK21_STATS_PATH, 'utf8'))
+    }
+
+    // Merge patch ke persistent stats
+    current.total_success   = (current.total_success   || 0) + (patch.success   ? 1 : 0)
+    current.total_failed    = (current.total_failed    || 0) + (patch.failed    ? 1 : 0)
+    current.total_duplicate = (current.total_duplicate || 0) + (patch.duplicate ? 1 : 0)
+
+    if (patch.size_bytes) {
+      current.total_size_bytes  = (current.total_size_bytes  || 0) + patch.size_bytes
+      current.total_success_for_avg = (current.total_success_for_avg || 0) + 1
+      current.avg_size_mb = ((current.total_size_bytes / current.total_success_for_avg) / 1024 / 1024).toFixed(1)
+    }
+
+    if (patch.duration_ms) {
+      current.total_duration_ms      = (current.total_duration_ms || 0) + patch.duration_ms
+      current.total_duration_for_avg = (current.total_duration_for_avg || 0) + 1
+      current.avg_duration_min       = ((current.total_duration_ms / current.total_duration_for_avg) / 1000 / 60).toFixed(1)
+    }
+
+    if (patch.title) {
+      current.last_movie        = patch.title
+      current.last_processed_at = new Date().toISOString()
+    }
+
+    if (patch.status       !== undefined) current.status       = patch.status
+    if (patch.active_title !== undefined) current.active_title = patch.active_title
+    if (patch.lock_start   !== undefined) current.lock_start   = patch.lock_start
+
+    current.last_updated = new Date().toISOString()
+
+    // Pastikan direktori ada
+    const dir = path.dirname(LK21_STATS_PATH)
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+
+    fs.writeFileSync(LK21_STATS_PATH, JSON.stringify(current, null, 2))
+  } catch (err) {
+    logger.warn({ event: 'lk21_stats_write_failed', msg: err.message })
+  }
+}
+
 
 // ─── MAIN HANDLER ───────────────────────────────────────────────────────────
 
@@ -375,12 +463,16 @@ async function handleSeedMovs(ctx) {
 
   // Set lock SETELAH semua validasi awal lulus
   seedMovsLock = true;
+  const lockStartTime = Date.now();
   let localFilePath = null;
   let activeSafeFileName = null;
+  let currentPhase = 'init';
+  updateLk21Stats({ status: 'PROCESSING', lock_start: new Date().toISOString(), active_title: '...' });
   const waitMsg = await ctx.reply('⏳ *Menganalisis URL LK21\\.\\.\\.*', { parse_mode: 'MarkdownV2', message_thread_id: threadId });
 
   try {
     // 1. DOM Parsing
+    currentPhase = 'dom_parsing';
     let pageData;
     try {
       const resp = await axiosGetWithRetry(url, { headers: getRandomHeaders(), timeout: 15000 });
@@ -421,6 +513,7 @@ async function handleSeedMovs(ctx) {
     if (!cleanTitle) {
       throw new Error('Gagal mengekstrak judul. Struktur halaman LK21 mungkin berubah atau terkena Cloudflare protection.');
     }
+    updateLk21Stats({ status: 'PROCESSING', active_title: cleanTitle, lock_start: new Date().toISOString() });
 
     let year = '';
     const yearMatch = cleanTitle.match(/\((\d{4})\)/);
@@ -434,6 +527,7 @@ async function handleSeedMovs(ctx) {
       const duplicate = existingMovies.find(m => m.year === year);
       if (duplicate) {
         logger.info({ event: 'lk21_early_duplicate_found', title: cleanTitle, year });
+        updateLk21Stats({ duplicate: true, title: cleanTitle, status: 'IDLE' });
         return ctx.telegram.editMessageText(
           ctx.chat.id, waitMsg.message_id, undefined,
           `ℹ️ Film *${escape(cleanTitle)}* \\(${escape(year)}\\) sudah ada di database\\. Unduhan dibatalkan\\.`,
@@ -458,6 +552,7 @@ async function handleSeedMovs(ctx) {
     await randomDelay(1500, 3000);
 
     // 2. Ekstraksi M3U8
+    currentPhase = 'm3u8_extraction';
     const result = await extractTurbovip(targetUrl);
 
     const preferBest = LK21_PREFER_QUALITY === 'best' || LK21_PREFER_QUALITY === 'highest';
@@ -481,6 +576,7 @@ async function handleSeedMovs(ctx) {
     await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `📥 *Mengunduh Video* \\[${escape(targetStream.quality)}\\]\n⏳ Progress: *0%*\n_Proses ini memakan waktu beberapa menit\\._`, { parse_mode: 'MarkdownV2' });
 
     // 3. Download ke VPS
+    currentPhase = 'download';
     localFilePath = await downloadM3u8(targetStream.url, activeSafeFileName, (percent, speedText) => {
       const speedLabel = speedText ? ` · ${escape(speedText)}` : '';
       ctx.telegram.editMessageText(
@@ -517,12 +613,14 @@ async function handleSeedMovs(ctx) {
       try { fs.unlinkSync(localFilePath); } catch (e) {
         logger.warn({ event: 'lk21_unlink_skip', msg: e.message, file: localFilePath });
       }
+      updateLk21Stats({ duplicate: true, title: cleanTitle, status: 'IDLE' });
       return ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `ℹ️ Film *${escape(cleanTitle)}* sudah ada di database\\. Unduhan dibatalkan\\.`, { parse_mode: 'MarkdownV2' });
     }
 
     await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, `🚀 *Mengunggah ke Archive Channel\\.\\.\\.*\nUkuran: ${escape((fileStats.size / 1024 / 1024).toFixed(2))} MB`, { parse_mode: 'MarkdownV2' });
 
     // 4. Upload ke Telegram Archive
+    currentPhase = 'telegram_upload';
     logger.info({ event: 'telegram_upload_start', target: cleanTitle, size_mb: (fileStats.size / 1024 / 1024).toFixed(2) });
 
     const resHeight = targetStream.quality.split('x').pop();
@@ -600,10 +698,11 @@ async function handleSeedMovs(ctx) {
     logger.info({ event: 'telegram_upload_success', archive_msg_id: archiveMsgId });
 
     // 5. Automasi TMDB & Database
+    currentPhase = 'tmdb_pipeline';
     await prosesDownloadSelesai({
       ctx, waitMsg, localFilePath, cleanTitle, year,
       fileStats, tgFileId, archiveMsgId,
-      userId, threadId, fileHash, tmdbMeta,
+      userId, threadId, fileHash, tmdbMeta, lockStartTime,
     });
   } catch (err) {
     try {
@@ -619,11 +718,64 @@ async function handleSeedMovs(ctx) {
     } catch (cleanupErr) {
       logger.warn({ event: 'lk21_cleanup_error', msg: cleanupErr.message });
     }
+    updateLk21Stats({ failed: true, status: 'IDLE', active_title: '' });
+    await notifySpiderError(url || 'unknown', currentPhase, err.message);
 
     ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(() => {});
     ctx.reply(`❌ *Gagal:* ${escape(err.message)}`, { parse_mode: 'MarkdownV2', message_thread_id: threadId });
   } finally {
     seedMovsLock = false;
+    updateLk21Stats({ status: 'IDLE', active_title: '' });
+  }
+}
+
+async function handleSeedMovsStatus(ctx) {
+  const threadId = ctx.message.message_thread_id;
+
+  try {
+    const lockStatus = seedMovsLock ? '🔴 Aktif' : '🟢 Idle';
+
+    let statsText = '_Belum ada data statistik\\._';
+    if (fs.existsSync(LK21_STATS_PATH)) {
+      const stats = JSON.parse(fs.readFileSync(LK21_STATS_PATH, 'utf8'));
+
+      const activeTitle = stats.active_title
+        ? `\n🎬 *Film Saat Ini:* _${escape(stats.active_title)}_` : '';
+
+      let lockDuration = '';
+      if (seedMovsLock && stats.lock_start) {
+        const elapsedMin = ((Date.now() - new Date(stats.lock_start).getTime()) / 1000 / 60).toFixed(1);
+        lockDuration = `\n⏱ *Berjalan:* ${escape(elapsedMin)} menit`;
+      }
+
+      const lastMovie = stats.last_movie
+        ? `\n🎞 *Film Terakhir:* _${escape(stats.last_movie)}_` : '';
+
+      const lastAt = stats.last_processed_at
+        ? `\n🕐 *Diproses:* ${escape(new Date(stats.last_processed_at).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' }))}` : '';
+
+      statsText =
+        `✅ Berhasil: *${stats.total_success || 0}*\n` +
+        `❌ Gagal: *${stats.total_failed || 0}*\n` +
+        `♻️ Duplikat: *${stats.total_duplicate || 0}*\n` +
+        `📦 Rata\\-rata ukuran: *${stats.avg_size_mb || '\\-'} MB*\n` +
+        `⏱ Rata\\-rata durasi: *${stats.avg_duration_min || '\\-'} menit*` +
+        lastMovie + lastAt;
+
+      statsText = activeTitle + lockDuration + '\n\n' + statsText;
+    }
+
+    await ctx.reply(
+      `🕸️ *LK21 Spider Status*\n\n` +
+      `🔒 *Lock:* ${lockStatus}\n` +
+      `${statsText}`,
+      { parse_mode: 'MarkdownV2', message_thread_id: threadId }
+    );
+  } catch (err) {
+    logger.warn({ event: 'seedmovs_status_error', msg: err.message });
+    await ctx.reply('❌ Gagal membaca status LK21 spider\\.', {
+      parse_mode: 'MarkdownV2', message_thread_id: threadId
+    });
   }
 }
 
@@ -677,4 +829,4 @@ function sweepOrphanedFiles() {
 
 setImmediate(() => sweepOrphanedFiles());
 
-module.exports = { handleSeedMovs };
+module.exports = { handleSeedMovs, handleSeedMovsStatus };

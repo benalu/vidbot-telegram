@@ -20,7 +20,7 @@ const {
 } = require('../spider/spider.admin')
 
 // ✨ IMPORT SPIDER LK21
-const { handleSeedMovs } = require('../../../scripts/spider-lk21')
+const { handleSeedMovs, handleSeedMovsStatus } = require('../../../scripts/spider-lk21')
 
 // Import utilitas & repo
 const { uploadToR2, trackKey } = require('../../utils/r2')
@@ -298,6 +298,7 @@ function registerAdminHandlers(bot) {
   bot.action(/^seed_artist:([a-zA-Z0-9]{22}):(\d+)$/, adminOnly(handleSeedArtistCallback))
 
   bot.command('seedmovs', spiderPanelOnly(handleSeedMovs))
+  bot.command('seedmovs_status', spiderPanelOnly(handleSeedMovsStatus))
   
   bot.on('audio',    handleAudioUpload)
   bot.on('document', handleAudioUpload)
