@@ -1,0 +1,29 @@
+{
+  "DUTAMOVIE21": {
+    "player6": {
+      "targetDomains": ["hanerix.com", "vibuxer.com", "audinifer.com", "minochinos.com"],
+      "description": "Daftar mirror domain tujuan untuk Player 6 Dutafilm"
+    },
+    "player5": {
+      "targetDomains": ["minochinos.com"],
+      "description": "Cadangan untuk player 5 jika kedepannya dinamis"
+    }
+  },
+  "LK21": {
+    "turbovip": {
+      "embedDomain": "emturbovid.com",
+      "description": "Domain embed untuk server Turbovip LK21"
+    }
+  },
+  "NGEFILM21": {
+    "player3": {
+      "targetDomains": ["vibuxer.com", "audinifer.com", "minochinos.com"],
+      "description": "Antisipasi untuk player 3 di Ngefilm21"
+    },
+    "player4": {
+      "targetDomains": ["hanerix.com", "vibuxer.com", "audinifer.com", "minochinos.com"],
+      "description": "Antisipasi untuk player 4 di Ngefilm21"
+    }
+    
+  }
+}

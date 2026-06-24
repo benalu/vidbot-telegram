@@ -158,7 +158,8 @@ function createHandler(commandName, { topic, handler, requiresArg }) {
 const bot = new Telegraf(process.env.TELEGRAM_TOKEN, {
   telegram: {
     apiRoot: 'http://127.0.0.1:8081'
-  }
+  },
+  handlerTimeout: Infinity
 })
 
 bot.use((ctx, next) => {

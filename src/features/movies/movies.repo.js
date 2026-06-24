@@ -46,6 +46,7 @@ const stmts = {
   getByHash: db.prepare(`SELECT * FROM movie_entries WHERE file_hash = ? LIMIT 1`),
   updateR2: db.prepare(`UPDATE movie_entries SET r2_url = ? WHERE id = ?`),
   search: db.prepare(`SELECT * FROM movie_entries WHERE LOWER(title) LIKE ? ORDER BY year DESC LIMIT 20`),
+  byYearRange: db.prepare(`SELECT * FROM movie_entries WHERE year IN (?, ?, ?) ORDER BY year DESC`),
 }
 
 function saveMovieLocal(data) {
@@ -56,6 +57,14 @@ function saveMovieLocal(data) {
 function getMovieByTmdbId(tmdbId) { return stmts.getByTmdbId.get(tmdbId) || null }
 function getMovieByHash(hash) { return stmts.getByHash.get(hash) || null }
 function searchMoviesLocal(keyword) { return stmts.search.all(`%${keyword.toLowerCase()}%`) }
+function getMoviesByYearRange(year) {
+  if (!year) return []
+  const y = parseInt(year, 10)
+  return stmts.byYearRange.all(String(y - 1), String(y), String(y + 1))
+}
 function updateMovieR2(id, url) { stmts.updateR2.run(url, id) }
 
-module.exports = { saveMovieLocal, getMovieByTmdbId, getMovieByHash, searchMoviesLocal, updateMovieR2 }
+module.exports = {
+  saveMovieLocal, getMovieByTmdbId, getMovieByHash,
+  searchMoviesLocal, getMoviesByYearRange, updateMovieR2
+}

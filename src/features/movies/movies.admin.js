@@ -215,6 +215,7 @@ function clearPendingMovie(userId) {
 
 module.exports = {
   handleMovieUpload,
+  handleMovieTmdbInput,
   pendingMovieMeta,
   clearPendingMovie,    
   executeMoviePipeline

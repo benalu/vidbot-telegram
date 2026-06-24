@@ -33,6 +33,9 @@ const R2_FAIL_WINDOW_MS   = 10 * 60 * 1000  // window 10 menit untuk R2 failure 
 const r2FailTimestamps = []
 const alertCooldowns = new Map()
 const ALERT_COOLDOWN_MS = 15 * 60 * 1000
+const ALERT_COOLDOWN_OVERRIDES = {
+  spider_stale: 2 * 60 * 60 * 1000,  // 2 jam
+}
 const apiWasDown  = { value: false }
 const memWasHigh  = { value: false }
 
@@ -67,7 +70,10 @@ async function sendAlert(text) {
       },
       { timeout: 10_000 }
     )
-    logger.info({ event: 'alert_sent', preview: text.slice(0, 80) })
+    logger.info({
+      event:   'alert_sent',
+      preview: text.slice(0, 100).replace(/[*_`\\]/g, '').replace(/\n/g, ' ').trim()
+  })
   } catch (err) {
     // Jangan throw — alerting tidak boleh crash bot
     logger.warn({ event: 'alert_send_failed', msg: err.message })
@@ -77,12 +83,12 @@ async function sendAlert(text) {
 // ── Cooldown guard ────────────────────────────────────────────────────────────
 
 function shouldAlert(type) {
+  const cooldown = ALERT_COOLDOWN_OVERRIDES[type] ?? ALERT_COOLDOWN_MS
   const last = alertCooldowns.get(type) || 0
-  if (Date.now() - last < ALERT_COOLDOWN_MS) return false
+  if (Date.now() - last < cooldown) return false
   alertCooldowns.set(type, Date.now())
   return true
 }
-
 // ── Check 1: Memory ───────────────────────────────────────────────────────────
 
 async function checkMemory() {
